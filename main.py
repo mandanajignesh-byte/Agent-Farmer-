@@ -19,6 +19,16 @@ SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON"
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
 HANDS_PER_DAY = 6
 SEED_BUFFER = HANDS_PER_DAY + 2
+# Quadrants cost 1k, 2k, 4k. Buying land is a measured LOSS at current
+# movement efficiency - 12 seeds, mean vs starter:
+#            hands=6   hands=8  hands=10
+#   1 quad   $11,048   $10,128    $7,445
+#   2 quads   $9,555   $10,765    $9,237
+# Labour is capped by fib cost and ~65% of every turn is already walking,
+# so 25 tiles is past the optimum. Raise this only if movement improves.
+MAX_QUADRANTS = 1
+LAND_RESERVE = 500
+LAND_LAST_DAY = 20
 # Scales priority against walking distance when picking a target tile.
 # Swept over 15 seeds: W=1 $7,216 / W=2 $7,315 / W=3 $7,132 / strict $7,104.
 # The whole spread sits inside one standard error, so this is not a
@@ -124,6 +134,11 @@ def _market_orders(obs, farm, private):
     # Hands vanish at end of day and must be rehired each morning. fib(n) makes
     # the first few nearly free: 1, 1, 2, 3, 5, 8 ...
     orders = [["HIRE"]] * max(0, HANDS_PER_DAY - farm["hires_today"])
+
+    bought = len(farm["unlocked_quadrants"]) - 1
+    if bought < MAX_QUADRANTS - 1 and obs["day"] <= LAND_LAST_DAY:
+        if farm["money"] >= 1000 * 2**bought + LAND_RESERVE:
+            orders.append(["BUY_LAND"])
 
     orders += [["SELL", item, qty] for item, qty in private["shed"].items() if qty > 0]
 
