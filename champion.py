@@ -43,7 +43,7 @@ PARAMS = {
     # Watering inside the bonus window earns a unit of yield; outside it, on a
     # plant in no danger, it earns nothing and only costs the walk.
     "w_water_bonus": 8.316,
-    "w_water_idle": 8.316,
+    "w_water_idle": 30.0,
     "w_plant": 9.934,
     "w_dig": 11.086,
     "w_dist": 1.0,

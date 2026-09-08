@@ -37,14 +37,14 @@ WEED = "WEED"
 # the old PRIORITY_WEIGHT of 2; there was never a reason for them to be evenly
 # spaced integers, so they are now searchable.
 PARAMS = {
-    "w_water_urgent": 5.693,
+    "w_water_urgent": 5.994,
     "w_harvest_decay": 3.188,
     "w_harvest_ripe": 5.514,
     # Watering inside the bonus window earns a unit of yield; outside it, on a
     # plant in no danger, it earns nothing and only costs the walk.
     "w_water_bonus": 8.316,
     "w_water_idle": 30.0,
-    "w_plant": 9.934,
+    "w_plant": 10.498,
     "w_dig": 11.086,
     "w_dist": 1.0,
     # PLANT only. Where an existing plant sits is already fixed, but choosing
