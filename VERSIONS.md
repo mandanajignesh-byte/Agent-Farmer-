@@ -14,7 +14,10 @@ Starting money is $3,000, so subtract that to read profit.
 |---|---|---|---|
 | v1 `4f3ee6d` | Rule-based wheat farmer, strict priority | $3,911 | single episode |
 | v2 `b695191` | Harvest at max yield, not first yield | $7,754 | single episode |
-| v3 `ae22613` | Weigh priority against walking distance | $7,315 mean | 15 seeds, 15/15 wins |
+| v3 `ae22613` | Weigh priority against walking distance | $7,315 mean | 15 seeds, 15/15 — **no real gain** |
+| v4 `70cbdde` | Hire 6 hands/day, claim-based assignment | $9,733 mean | 15 seeds, 15/15 |
+| v5 `cbdc924` | Clear weeds with DIG | **$10,918 mean** | 15 seeds, 15/15 |
+| v6 `1a244ba` | Land purchase — measured, left **disabled** | $10,918 mean | buying land *loses* money |
 
 ---
 
@@ -118,21 +121,104 @@ estimate and costs nothing.
 
 ---
 
+## v4 — hire farm hands
+
+Hiring is a market order, so it costs **no farmer action**, and `fib(n)` makes
+the first few nearly free — the first hand each day costs **$1** for a full extra
+action every turn.
+
+**The design problem:** running v3's target selection once per worker sends
+*every* worker to the same tile, since they all score the same pool from their
+own position. Splitting workers into roles ("farmer waters, hands harvest")
+doesn't fix it either — five hands with harvest duty and one ripe tile still
+collide.
+
+**The fix:** assign sequentially, farmer first, and **pop each claimed tile out
+of the pool**. Workers spread out on their own, with no role assignment.
+
+Also caps the plantable pool at seed count — planting more tiles in a turn than
+you hold seeds for makes **every** PLANT that turn fail, not just the surplus.
+
+**Sweep over hands/day** (12 seeds) — an inverted U, where 10 hands is worse
+than hiring nobody:
+
+| hands | 0 | 2 | 4 | **6** | 8 | 10 |
+|---|---|---|---|---|---|---|
+| mean | $7,012 | $9,021 | $8,935 | **$9,869** | $7,927 | $5,927 |
+
+fib explodes at the tail: 6 hands cost $20/day, 10 cost $143/day — a $3,690
+seasonal gap that closely tracks the observed collapse. With only 25 tiles there
+is also very little for a 10th worker to do.
+
+**Result:** $7,315 → $9,733.
+
+---
+
+## v5 — clear weeds
+
+Profiling v4 showed weeds climbing **0 → 4 → 9 and sticking**: 9 of 25 tiles
+permanently retired, with planted tiles falling 21 → 16 to match.
+
+A detail worth noting: `empty` was 0 from day 5 onward, and weeds only spawn
+randomly on *empty* ground — so those weeds weren't random. They were plants
+dying and decaying in place.
+
+`DIG` goes **last**, above only PASS. Weeds don't worsen with time so digging is
+never urgent, and 31% of worker-actions were idle anyway — the work is free. It
+also feeds planting, since a weed occupies a tile PLANT would otherwise use.
+
+Weeds now go **0 → 3 → 1 → 0** and stay clear, for **26 DIG actions** all season.
+Planted tiles rise 16 → 25 (full farm), idle falls 31% → 13%.
+
+**Result:** $9,733 → **$10,918**.
+
+---
+
+## v6 — land purchase (negative result)
+
+Buying land looked like the obvious next step once hiring provided the labour.
+It isn't. Enabled, it cost more than a third of earnings and dropped the win rate
+to **7/15**.
+
+**Joint sweep** — land and labour are coupled, so tuning them separately would
+have been the mistake (12 seeds):
+
+| | hands=6 | hands=8 | hands=10 |
+|---|---|---|---|
+| **1 quad** (25 tiles) | **$11,048** | $10,128 | $7,445 |
+| **2 quads** (50 tiles) | $9,555 | $10,765 | $9,237 |
+
+The coupling is real — with land the optimum *does* shift to more hands (8 rather
+than 6). But even optimally staffed, land never catches up.
+
+**Why:** labour has a hard ceiling because fib cost explodes (11th hand $89/day,
+14th $377/day), and ~65% of every worker's turn is already spent walking a 5×5
+quadrant. Doubling the area doubles the walking without adding workers to absorb
+it, so tiles miss waterings and decay. **25 tiles is already past the optimum.**
+
+Left behind `MAX_QUADRANTS = 1` with the numbers recorded. Cheap to revisit — but
+the blocker is **movement efficiency**, not the land price.
+
+---
+
 ## Known gaps
 
-Deliberately unimplemented, roughly in order of expected value:
+Roughly in order of expected value:
 
-1. **No hired hands.** Hiring is a market order, so it costs no farmer action,
-   and the cost is `fib(n)` per hand per day — the first hand of the day costs
-   **$1**. Each hand gets its own action every turn. This is almost certainly
-   the largest single lever available and it is completely untouched.
-2. **Only 9 of 25 tiles used.** `PLANT` is last in priority, so the farm never
-   fills. One farmer cannot water 25 tiles anyway (25 waterings > 24 actions),
-   which is why hands come first.
-3. **Weeds never cleared.** No `DIG` rule at all; weeds permanently retire tiles.
-4. **Wheat only.** No melon plot, so the highest-margin crop is unused.
-5. **No animals, no land purchase.**
-6. **Dumps the whole shed every turn** with no regard for price impact. Safe for
+1. **Movement is 65% of all actions** — the single dominant cost, and the thing
+   blocking land from ever paying off. Two angles: assignment is greedy and
+   sequential (a globally optimal worker→tile matching would beat it), and
+   nothing encourages planting in clusters near the shed where workers spawn.
+2. **Wheat only.** The highest-margin crop is unused. Melon is worth ~$142/tile/day
+   against wheat's $35 — but caps at 8-9 tiles for the whole season
+   (see [NOTES.md](NOTES.md#why-melon-cannot-be-scaled)), so it's a small plot
+   alongside wheat, not a replacement.
+3. **No fertilizer.** Wheat maxes at 4 units unfertilized versus 6 fertilized —
+   a 50% yield increase on every tile, currently untouched.
+4. **No animals.** Ongoing income, and they produce fertilizer as a free byproduct.
+5. **Dumps the whole shed every turn** with no regard for price impact. Safe for
    wheat, which barely moves on glut; would be ruinous for melon or strawberry.
-7. **"Nearest" ignores value** — a wheat plant 1 step away outranks a melon 4
+6. **"Nearest" ignores value** — a wheat plant 1 step away outranks a melon 4
    steps away when both are dying.
+7. **No endgame liquidation.** Unsold inventory scores $0, so the last day should
+   dump everything; currently nothing special happens at the end.

@@ -19,14 +19,17 @@ TOOLKIT.md    the learning-toolkit README this repo was started from
 
 ## Current state
 
-**v3** — mean **$7,315** over 15 seeds vs the built-in `starter` agent,
-**15/15 wins** (stdev $436). Starting money is $3,000, so that is ~$4,300 profit
-per season.
+**v6** — mean **$10,918** over 15 seeds vs the built-in `starter` agent,
+**15/15 wins** (stdev $1,317). Starting money is $3,000, so ~$7,900 profit per
+season.
 
-Wheat only, one farmer, no hired hands, no animals, no land purchase. See
-[Known gaps](VERSIONS.md#known-gaps) — the largest untapped lever is hiring,
-where the first farm hand of each day costs **$1** and grants a full extra
-action every turn.
+Wheat only, 25 tiles, 6 hired hands per day. No animals, no fertilizer, and
+deliberately **no land** — buying it is a measured loss
+([why](VERSIONS.md#v6--land-purchase-negative-result)).
+
+The dominant remaining cost is **movement at 65% of all actions**. That is also
+what blocks land from paying off, so it is the next thing worth attacking. Full
+list in [Known gaps](VERSIONS.md#known-gaps).
 
 ## Setup
 
@@ -58,7 +61,7 @@ python bench.py 15 starter
 ## Submitting
 
 ```bash
-kaggle competitions submit kaggriculture -f main.py -m "v3 weighted target selection"
+kaggle competitions submit kaggriculture -f main.py -m "v6 hands + weed clearing"
 ```
 
 5 submissions/day; only the latest 2 stay active. Ranking is Elo-style across
