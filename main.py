@@ -12,6 +12,10 @@ TURNS_PER_DAY = 24
 CROP = "WHEAT"
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
+# Watering only adds yield from half-way to max yield onward. Before that it is
+# pure survival, and survival tolerates every other day - so an early watering
+# on a healthy plant buys nothing at all.
+BONUS_START = {crop: (day + 1) // 2 for crop, day in MAX_YIELD_DAY.items()}
 
 HANDS_PER_DAY = 6
 SEED_BUFFER = HANDS_PER_DAY + 2
@@ -36,7 +40,10 @@ PARAMS = {
     "w_water_urgent": 5.693,
     "w_harvest_decay": 3.188,
     "w_harvest_ripe": 5.514,
-    "w_water_routine": 8.316,
+    # Watering inside the bonus window earns a unit of yield; outside it, on a
+    # plant in no danger, it earns nothing and only costs the walk.
+    "w_water_bonus": 8.316,
+    "w_water_idle": 8.316,
     "w_plant": 9.934,
     "w_dig": 11.086,
     "w_dist": 1.0,
@@ -103,7 +110,10 @@ def _candidates(obs, farm, private):
             elif units > 0 and ripe:
                 found.append(("w_harvest_ripe", HARVEST, x, y, units))
             elif not tile["watered_today"]:
-                found.append(("w_water_routine", WATER, x, y, 0))
+                age = obs["day"] - tile["planted_day"]
+                earning = BONUS_START[tile["crop"]] <= age <= MAX_YIELD_DAY[tile["crop"]]
+                key = "w_water_bonus" if earning else "w_water_idle"
+                found.append((key, WATER, x, y, 0))
 
     # Planting more tiles than we hold seeds for makes every PLANT that turn
     # fail, not just the surplus ones.

@@ -20,6 +20,7 @@ Starting money is $3,000, so subtract that to read profit.
 | v6 `1a244ba` | Land purchase — measured, left **disabled** | $10,918 mean | buying land *loses* money |
 | v7 `36ba8e1` | Priorities become searchable weights | +$145 vs v6 | 16-0, tie-break change |
 | v8 `e89f455` | **Weights tuned by hill climbing** | **+$1,280 vs v7** | **40-0 on held-out seeds** |
+| v9 `0404fe4` | Global worker→tile assignment | +$309 vs v8 | 24-0 held-out; stickiness **failed** |
 
 From v7 onward the metric changes. `bench.py` now measures **head-to-head win
 rate against a champion snapshot**, not dollars — the leaderboard is Elo over
@@ -276,6 +277,57 @@ general** rather than choosing between locations.
 
 `w_yield` never moved across ~30 mutation attempts and was **deleted** — a
 feature measured to earn nothing, rather than one argued away.
+
+---
+
+## v9 — movement
+
+Profiling v8: movement was **65% of all actions**, at **1.92 walking steps per
+productive action**. Two hypotheses, one worked.
+
+### What worked — global assignment
+
+Workers used to pick in a fixed order, farmer first. So the farmer could take a
+tile a hand was *standing on*, sending that hand walking across the farm for a
+replacement. Now the best `(worker, tile)` pair **anywhere** is taken repeatedly
+until everyone has a job.
+
+Held-out seeds 500-511: **24W-0L, +$309, p=0.0000**.
+
+### What failed — target stickiness
+
+The idea: a worker part-way through a walk gets a discount for continuing, so
+part-spent journeys aren't abandoned. Measured retargeting first — 22% of walk
+steps involved a worker switching targets mid-walk — so it looked worth fixing.
+
+**It changed nothing.** `w_sticky = 0` and `w_sticky = 50` produce byte-identical
+results, and 50 should swamp every other term in the formula.
+
+The reason is worth keeping: **the distance term already provides stickiness
+implicitly.** Walking toward a target reduces its distance, which lowers its
+score, which makes it *more* attractive next turn than it was before. The formula
+was already self-reinforcing; an explicit bonus only restates a decision it was
+making anyway.
+
+Measured directly — of 1,924 worker-turns holding a heading:
+
+| | |
+|---|---|
+| target still available | 1,683 (87.5%) — taken anyway, bonus irrelevant |
+| target gone to another worker | 241 (12.5%) — **forced** retarget, nothing to stick to |
+
+Removed, along with the `_TARGETS` state it required — which also disposed of two
+hazards it introduced: state leaking between episodes in one process, and both
+seats sharing one dict when a single module serves both.
+
+### The floor
+
+Worth knowing before optimising further: to water 25 tiles daily with 7 workers,
+each visits ~3.6 tiles/day, and the mean hop in a 5×5 grid is ~3.3 steps — about
+**77% movement**. We're at 65%, so routing is already *better* than naive. **The
+walking is not waste; it is inherent to visiting every tile every day.**
+
+The lever is therefore not smarter routing but **needing fewer visits**.
 
 ---
 
