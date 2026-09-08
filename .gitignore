@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 replay*.json
+tuned_params.json
+champion.py

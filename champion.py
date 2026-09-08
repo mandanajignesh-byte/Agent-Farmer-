@@ -1,22 +1,18 @@
-"""Kaggriculture agent - v1.
+"""Kaggriculture agent.
 
-Crops only, wheat only. Implements the priority list:
-  1. water a plant that dies tonight
-  2. harvest a decaying plant
-  3. harvest a ready plant
-  4. water any unwatered plant
-  5. plant a seed on an empty tile
-  6. PASS
+Every turn each worker (the farmer plus any hired hands) is given one action.
+Candidate tiles are scored by a weighted sum of features and the lowest score
+wins; workers claim tiles one at a time so no two walk to the same place.
 
-Target tile is whichever minimises priority * PRIORITY_WEIGHT + distance,
-so a cheap job underfoot can outrank a marginally better one across the
-farm, while a plant about to die still outranks everything.
+All tuneable behaviour lives in PARAMS so the weights can be searched rather
+than hand-picked - see tune.py. The defaults below reproduce v6 exactly.
 """
 
 TURNS_PER_DAY = 24
 CROP = "WHEAT"
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
+
 HANDS_PER_DAY = 6
 SEED_BUFFER = HANDS_PER_DAY + 2
 # Quadrants cost 1k, 2k, 4k. Buying land is a measured LOSS at current
@@ -29,19 +25,39 @@ SEED_BUFFER = HANDS_PER_DAY + 2
 MAX_QUADRANTS = 1
 LAND_RESERVE = 500
 LAND_LAST_DAY = 20
-# Scales priority against walking distance when picking a target tile.
-# Swept over 15 seeds: W=1 $7,216 / W=2 $7,315 / W=3 $7,132 / strict $7,104.
-# The whole spread sits inside one standard error, so this is not a
-# measured win - it only rules out pathological cross-farm thrashing.
-PRIORITY_WEIGHT = 2
 
-WATER, HARVEST, PLANT, DIG = "WATER", "HARVEST", "PLANT", "DIG"
+WATER, HARVEST, PLANT, DIG, PASS = "WATER", "HARVEST", "PLANT", "DIG", "PASS"
 WEED = "WEED"
-ACTION_FOR_PRIORITY = {1: WATER, 2: HARVEST, 3: HARVEST, 4: WATER, 5: PLANT, 6: DIG}
+
+# Lower score wins. The first six were hardcoded priority levels 1-6 scaled by
+# the old PRIORITY_WEIGHT of 2; there was never a reason for them to be evenly
+# spaced integers, so they are now searchable.
+PARAMS = {
+    "w_water_urgent": 2.0,
+    "w_harvest_decay": 4.0,
+    "w_harvest_ripe": 6.0,
+    "w_water_routine": 8.0,
+    "w_plant": 10.0,
+    "w_dig": 12.0,
+    "w_dist": 1.0,
+    # PLANT only. Where an existing plant sits is already fixed, but choosing
+    # where to plant fixes every future trip to that tile.
+    "w_shed": 0.0,
+    # Subtracted, so a fuller tile scores lower and is harvested sooner.
+    "w_yield": 0.0,
+}
 
 
 def _distance(ax, ay, bx, by):
     return abs(ax - bx) + abs(ay - by)
+
+
+def _shed_distance(x, y, board_size):
+    """Steps to the nearest tile the shed can be reached from."""
+    half = board_size // 2
+    return min(
+        _distance(x, y, cx, cy) for cx in (half - 1, half) for cy in (half - 1, half)
+    )
 
 
 def _step_toward(fx, fy, tx, ty):
@@ -54,25 +70,25 @@ def _step_toward(fx, fy, tx, ty):
     return "NORTH"
 
 
-def _bucket_tiles(obs, farm, private):
-    """Group actionable tiles by priority. Lower key = more urgent."""
+def _candidates(obs, farm, private):
+    """Every actionable tile as (param_key, action, x, y, yield_units)."""
     step, hour = obs["step"], obs["hour"]
     seeds = private["seeds"].get(CROP, 0)
     can_plant = seeds > 0 and TURNS_PER_DAY - hour >= 2
-    buckets = {1: [], 2: [], 3: [], 4: [], 5: [], 6: []}
 
+    found, plantable = [], []
     for y, row in enumerate(farm["tiles"]):
         for x, tile in enumerate(row):
             if tile == "LOCKED":
                 continue
             if tile is None:
                 if can_plant:
-                    buckets[5].append((x, y))
+                    plantable.append((x, y))
                 continue
             if not isinstance(tile, dict):
                 continue
             if tile.get("kind") == WEED:
-                buckets[6].append((x, y))
+                found.append(("w_dig", DIG, x, y, 0))
                 continue
             if tile.get("kind") != PLANT:
                 continue
@@ -80,51 +96,50 @@ def _bucket_tiles(obs, farm, private):
             lifespan = tile["max_lifespan_step"]
             decaying = lifespan != -1 and step >= lifespan
             ripe = obs["day"] - tile["planted_day"] >= MAX_YIELD_DAY[tile["crop"]]
-            has_yield = tile["yield_units"] > 0
+            units = tile["yield_units"]
 
             if tile["consecutive_unwatered"] >= 1 and not tile["watered_today"]:
-                buckets[1].append((x, y))
-            elif has_yield and decaying:
-                buckets[2].append((x, y))
-            elif has_yield and ripe:
-                buckets[3].append((x, y))
+                found.append(("w_water_urgent", WATER, x, y, 0))
+            elif units > 0 and decaying:
+                found.append(("w_harvest_decay", HARVEST, x, y, units))
+            elif units > 0 and ripe:
+                found.append(("w_harvest_ripe", HARVEST, x, y, units))
             elif not tile["watered_today"]:
-                buckets[4].append((x, y))
+                found.append(("w_water_routine", WATER, x, y, 0))
 
     # Planting more tiles than we hold seeds for makes every PLANT that turn
     # fail, not just the surplus ones.
-    buckets[5] = buckets[5][:seeds]
-    return buckets
+    found += [("w_plant", PLANT, x, y, 0) for x, y in plantable[:seeds]]
+    return found
+
+
+def _score(candidate, wx, wy, board_size):
+    key, _action, x, y, units = candidate
+    score = PARAMS[key] + PARAMS["w_dist"] * _distance(wx, wy, x, y)
+    if key == "w_plant":
+        score += PARAMS["w_shed"] * _shed_distance(x, y, board_size)
+    return score - PARAMS["w_yield"] * units
 
 
 def _assign_actions(obs, farm, private):
     """One action per worker, farmer first. Claimed tiles leave the pool so no
     two workers walk to the same tile."""
+    board_size = len(farm["tiles"])
     workers = [tuple(farm["farmer"])] + [tuple(h) for h in farm["hands"]]
-    pool = [
-        (priority, x, y)
-        for priority, tiles in _bucket_tiles(obs, farm, private).items()
-        for x, y in tiles
-    ]
+    pool = _candidates(obs, farm, private)
 
     actions = []
     for wx, wy in workers:
-        best = None
-        for i, (priority, tx, ty) in enumerate(pool):
-            score = priority * PRIORITY_WEIGHT + _distance(wx, wy, tx, ty)
-            if best is None or score < best[0]:
-                best = (score, i, priority, tx, ty)
-
-        if best is None:
-            actions.append(["PASS"])
+        if not pool:
+            actions.append([PASS])
             continue
 
-        _, index, priority, tx, ty = best
-        pool.pop(index)
+        index = min(range(len(pool)), key=lambda i: _score(pool[i], wx, wy, board_size))
+        _key, action, tx, ty, _units = pool.pop(index)
+
         if (tx, ty) != (wx, wy):
             actions.append([_step_toward(wx, wy, tx, ty)])
         else:
-            action = ACTION_FOR_PRIORITY[priority]
             actions.append([action, CROP] if action == PLANT else [action])
 
     return actions[0], actions[1:]
