@@ -17,7 +17,7 @@ MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON
 # on a healthy plant buys nothing at all.
 BONUS_START = {crop: (day + 1) // 2 for crop, day in MAX_YIELD_DAY.items()}
 
-HANDS_PER_DAY = 6
+HANDS_PER_DAY = 8
 SEED_BUFFER = HANDS_PER_DAY + 2
 # Quadrants cost 1k, 2k, 4k. Buying land is a measured LOSS at current
 # movement efficiency - 12 seeds, mean vs starter:
@@ -26,7 +26,7 @@ SEED_BUFFER = HANDS_PER_DAY + 2
 #   2 quads   $9,555   $10,765    $9,237
 # Labour is capped by fib cost and ~65% of every turn is already walking,
 # so 25 tiles is past the optimum. Raise this only if movement improves.
-MAX_QUADRANTS = 1
+MAX_QUADRANTS = 3
 LAND_RESERVE = 500
 LAND_LAST_DAY = 20
 
