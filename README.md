@@ -62,7 +62,7 @@ python bench.py 15 starter
 ## Submitting
 
 ```bash
-kaggle competitions submit kaggriculture -f main.py -m "v8 tuned weights"
+kaggle competitions submit kaggriculture -f main.py -m "v14 melon plot + 3 quadrants"
 ```
 
 5 submissions/day; only the latest 2 stay active. Ranking is Elo-style across

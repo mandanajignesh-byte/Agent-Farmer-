@@ -15,7 +15,7 @@ STAPLE = "WHEAT"
 # I0, and no town shop ever consumes one. At ~18 melons per tile per season that
 # caps the plot at roughly 8-9 tiles however much land we own.
 PREMIUM = "MELON"
-PREMIUM_TILES = 8
+PREMIUM_TILES = 14
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
 # Watering only adds yield from half-way to max yield onward. Before that it is
