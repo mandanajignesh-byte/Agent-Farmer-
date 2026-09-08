@@ -25,8 +25,9 @@ SEED_BUFFER = HANDS_PER_DAY + 2
 # measured win - it only rules out pathological cross-farm thrashing.
 PRIORITY_WEIGHT = 2
 
-WATER, HARVEST, PLANT = "WATER", "HARVEST", "PLANT"
-ACTION_FOR_PRIORITY = {1: WATER, 2: HARVEST, 3: HARVEST, 4: WATER, 5: PLANT}
+WATER, HARVEST, PLANT, DIG = "WATER", "HARVEST", "PLANT", "DIG"
+WEED = "WEED"
+ACTION_FOR_PRIORITY = {1: WATER, 2: HARVEST, 3: HARVEST, 4: WATER, 5: PLANT, 6: DIG}
 
 
 def _distance(ax, ay, bx, by):
@@ -48,7 +49,7 @@ def _bucket_tiles(obs, farm, private):
     step, hour = obs["step"], obs["hour"]
     seeds = private["seeds"].get(CROP, 0)
     can_plant = seeds > 0 and TURNS_PER_DAY - hour >= 2
-    buckets = {1: [], 2: [], 3: [], 4: [], 5: []}
+    buckets = {1: [], 2: [], 3: [], 4: [], 5: [], 6: []}
 
     for y, row in enumerate(farm["tiles"]):
         for x, tile in enumerate(row):
@@ -58,7 +59,12 @@ def _bucket_tiles(obs, farm, private):
                 if can_plant:
                     buckets[5].append((x, y))
                 continue
-            if not isinstance(tile, dict) or tile.get("kind") != PLANT:
+            if not isinstance(tile, dict):
+                continue
+            if tile.get("kind") == WEED:
+                buckets[6].append((x, y))
+                continue
+            if tile.get("kind") != PLANT:
                 continue
 
             lifespan = tile["max_lifespan_step"]
