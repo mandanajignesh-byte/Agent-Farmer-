@@ -13,6 +13,7 @@ reads the game state and returns one action.
 main.py       the agent (submission entry point)
 bench.py      paired head-to-head benchmark with a significance test
 tune.py       hill climber over the scoring weights
+LEARNING_PLAN.md  what to work through, and in what order
 VERSIONS.md   what each version changed, and what it scored
 NOTES.md      derived game economics - the reasoning behind the strategy
 TOOLKIT.md    the learning-toolkit README this repo was started from
