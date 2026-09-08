@@ -36,7 +36,6 @@ STEP = {
     "w_plant": 1.0,
     "w_dig": 1.0,
     "w_shed": 0.4,
-    "w_yield": 0.4,
 }
 
 

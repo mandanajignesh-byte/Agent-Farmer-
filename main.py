@@ -33,18 +33,16 @@ WEED = "WEED"
 # the old PRIORITY_WEIGHT of 2; there was never a reason for them to be evenly
 # spaced integers, so they are now searchable.
 PARAMS = {
-    "w_water_urgent": 2.0,
-    "w_harvest_decay": 4.0,
-    "w_harvest_ripe": 6.0,
-    "w_water_routine": 8.0,
-    "w_plant": 10.0,
-    "w_dig": 12.0,
+    "w_water_urgent": 5.693,
+    "w_harvest_decay": 3.188,
+    "w_harvest_ripe": 5.514,
+    "w_water_routine": 8.316,
+    "w_plant": 9.934,
+    "w_dig": 11.086,
     "w_dist": 1.0,
     # PLANT only. Where an existing plant sits is already fixed, but choosing
     # where to plant fixes every future trip to that tile.
-    "w_shed": 0.0,
-    # Subtracted, so a fuller tile scores lower and is harvested sooner.
-    "w_yield": 0.0,
+    "w_shed": -1.418,
 }
 
 
@@ -114,11 +112,11 @@ def _candidates(obs, farm, private):
 
 
 def _score(candidate, wx, wy, board_size):
-    key, _action, x, y, units = candidate
+    key, _action, x, y, _units = candidate
     score = PARAMS[key] + PARAMS["w_dist"] * _distance(wx, wy, x, y)
     if key == "w_plant":
         score += PARAMS["w_shed"] * _shed_distance(x, y, board_size)
-    return score - PARAMS["w_yield"] * units
+    return score
 
 
 def _assign_actions(obs, farm, private):
