@@ -14,6 +14,7 @@ Target selection is strict priority first, nearest tile as tie-break.
 TURNS_PER_DAY = 24
 CROP = "WHEAT"
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
+MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
 SEED_BUFFER = 3
 
 WATER, HARVEST, PLANT = "WATER", "HARVEST", "PLANT"
@@ -51,12 +52,17 @@ def _bucket_tiles(obs, farm, private):
             if not isinstance(tile, dict) or tile.get("kind") != PLANT:
                 continue
 
+            lifespan = tile["max_lifespan_step"]
+            decaying = lifespan != -1 and step >= lifespan
+            ripe = obs["day"] - tile["planted_day"] >= MAX_YIELD_DAY[tile["crop"]]
+            has_yield = tile["yield_units"] > 0
+
             if tile["consecutive_unwatered"] >= 1 and not tile["watered_today"]:
                 buckets[1].append((x, y))
-            elif tile["yield_units"] > 0:
-                lifespan = tile["max_lifespan_step"]
-                decaying = lifespan != -1 and step >= lifespan
-                buckets[2 if decaying else 3].append((x, y))
+            elif has_yield and decaying:
+                buckets[2].append((x, y))
+            elif has_yield and ripe:
+                buckets[3].append((x, y))
             elif not tile["watered_today"]:
                 buckets[4].append((x, y))
 
