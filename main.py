@@ -9,7 +9,13 @@ than hand-picked - see tune.py. The defaults below reproduce v6 exactly.
 """
 
 TURNS_PER_DAY = 24
-CROP = "WHEAT"
+STAPLE = "WHEAT"
+# Melon earns ~$142/tile/day against wheat's $35, but its glut curve is brutal:
+# price = 250 * (1 - 3.6*(x/300)^2), hitting the $1 floor around 158 units above
+# I0, and no town shop ever consumes one. At ~18 melons per tile per season that
+# caps the plot at roughly 8-9 tiles however much land we own.
+PREMIUM = "MELON"
+PREMIUM_TILES = 8
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
 # Watering only adds yield from half-way to max yield onward. Before that it is
@@ -78,10 +84,10 @@ def _step_toward(fx, fy, tx, ty):
 def _candidates(obs, farm, private):
     """Every actionable tile as (param_key, action, x, y, yield_units)."""
     step, hour = obs["step"], obs["hour"]
-    seeds = private["seeds"].get(CROP, 0)
-    can_plant = seeds > 0 and TURNS_PER_DAY - hour >= 2
+    seeds = private["seeds"]
+    can_plant = TURNS_PER_DAY - hour >= 2
 
-    found, plantable = [], []
+    found, plantable, premium_grown = [], [], 0
     for y, row in enumerate(farm["tiles"]):
         for x, tile in enumerate(row):
             if tile == "LOCKED":
@@ -93,10 +99,12 @@ def _candidates(obs, farm, private):
             if not isinstance(tile, dict):
                 continue
             if tile.get("kind") == WEED:
-                found.append(("w_dig", DIG, x, y, 0))
+                found.append(("w_dig", DIG, x, y, 0, None))
                 continue
             if tile.get("kind") != PLANT:
                 continue
+            if tile["crop"] == PREMIUM:
+                premium_grown += 1
 
             lifespan = tile["max_lifespan_step"]
             decaying = lifespan != -1 and step >= lifespan
@@ -104,25 +112,35 @@ def _candidates(obs, farm, private):
             units = tile["yield_units"]
 
             if tile["consecutive_unwatered"] >= 1 and not tile["watered_today"]:
-                found.append(("w_water_urgent", WATER, x, y, 0))
+                found.append(("w_water_urgent", WATER, x, y, 0, None))
             elif units > 0 and decaying:
-                found.append(("w_harvest_decay", HARVEST, x, y, units))
+                found.append(("w_harvest_decay", HARVEST, x, y, units, None))
             elif units > 0 and ripe:
-                found.append(("w_harvest_ripe", HARVEST, x, y, units))
+                found.append(("w_harvest_ripe", HARVEST, x, y, units, None))
             elif not tile["watered_today"]:
                 age = obs["day"] - tile["planted_day"]
                 earning = BONUS_START[tile["crop"]] <= age <= MAX_YIELD_DAY[tile["crop"]]
                 key = "w_water_bonus" if earning else "w_water_idle"
-                found.append((key, WATER, x, y, 0))
+                found.append((key, WATER, x, y, 0, None))
 
-    # Planting more tiles than we hold seeds for makes every PLANT that turn
-    # fail, not just the surplus ones.
-    found += [("w_plant", PLANT, x, y, 0) for x, y in plantable[:seeds]]
+    # Planting more tiles in a turn than we hold seeds for makes every PLANT
+    # that turn fail, not just the surplus ones - so each planned planting must
+    # be backed by a seed we actually have.
+    budget = {
+        PREMIUM: min(max(0, PREMIUM_TILES - premium_grown), seeds.get(PREMIUM, 0)),
+        STAPLE: seeds.get(STAPLE, 0),
+    }
+    for x, y in plantable:
+        crop = PREMIUM if budget[PREMIUM] else STAPLE if budget[STAPLE] else None
+        if crop is None:
+            break
+        budget[crop] -= 1
+        found.append(("w_plant", PLANT, x, y, 0, crop))
     return found
 
 
 def _score(candidate, wx, wy, board_size):
-    key, _action, x, y, _units = candidate
+    key, _action, x, y, _units, _crop = candidate
     score = PARAMS[key] + PARAMS["w_dist"] * _distance(wx, wy, x, y)
     if key == "w_plant":
         score += PARAMS["w_shed"] * _shed_distance(x, y, board_size)
@@ -152,13 +170,13 @@ def _assign_actions(obs, farm, private):
 
         _score_, w, c = best
         wx, wy = workers[w]
-        _key, action, tx, ty, _units = pool.pop(c)
+        _key, action, tx, ty, _units, crop = pool.pop(c)
         waiting.discard(w)
 
         if (tx, ty) != (wx, wy):
             actions[w] = [_step_toward(wx, wy, tx, ty)]
         else:
-            actions[w] = [action, CROP] if action == PLANT else [action]
+            actions[w] = [action, crop] if action == PLANT else [action]
 
     return actions[0], actions[1:]
 
@@ -175,9 +193,16 @@ def _market_orders(obs, farm, private):
 
     orders += [["SELL", item, qty] for item, qty in private["shed"].items() if qty > 0]
 
-    shortfall = SEED_BUFFER - private["seeds"].get(CROP, 0)
-    if shortfall > 0 and farm["money"] > SEED_COST[CROP] * shortfall:
-        orders.append(["BUY_SEED", CROP, shortfall])
+    grown = sum(
+        1
+        for row in farm["tiles"]
+        for tile in row
+        if isinstance(tile, dict) and tile.get("crop") == PREMIUM
+    )
+    for crop, want in ((PREMIUM, PREMIUM_TILES - grown), (STAPLE, SEED_BUFFER)):
+        shortfall = min(want, SEED_BUFFER) - private["seeds"].get(crop, 0)
+        if shortfall > 0 and farm["money"] > SEED_COST[crop] * shortfall:
+            orders.append(["BUY_SEED", crop, shortfall])
 
     return orders[:10]
 
