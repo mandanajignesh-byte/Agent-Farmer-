@@ -18,6 +18,13 @@ Starting money is $3,000, so subtract that to read profit.
 | v4 `70cbdde` | Hire 6 hands/day, claim-based assignment | $9,733 mean | 15 seeds, 15/15 |
 | v5 `cbdc924` | Clear weeds with DIG | **$10,918 mean** | 15 seeds, 15/15 |
 | v6 `1a244ba` | Land purchase — measured, left **disabled** | $10,918 mean | buying land *loses* money |
+| v7 `36ba8e1` | Priorities become searchable weights | +$145 vs v6 | 16-0, tie-break change |
+| v8 `e89f455` | **Weights tuned by hill climbing** | **+$1,280 vs v7** | **40-0 on held-out seeds** |
+
+From v7 onward the metric changes. `bench.py` now measures **head-to-head win
+rate against a champion snapshot**, not dollars — the leaderboard is Elo over
+wins, where a $1 win scores the same as a $50,000 win. Money margin survives only
+as a smooth signal for tuning.
 
 ---
 
@@ -198,6 +205,95 @@ it, so tiles miss waterings and decay. **25 tiles is already past the optimum.**
 
 Left behind `MAX_QUADRANTS = 1` with the numbers recorded. Cheap to revisit — but
 the blocker is **movement efficiency**, not the land price.
+
+---
+
+## v7 — searchable weights
+
+The priority levels `1..6` were integers picked by hand and evenly spaced for no
+reason. They became weights in `PARAMS`, along with two features the old formula
+was blind to:
+
+- **`w_shed`** — distance from the shed, on `PLANT` only. Where an *existing*
+  plant sits is already fixed, but choosing *where to plant* fixes every future
+  trip to that tile, and workers respawn at the shed each morning. Nothing in the
+  old formula knew where the shed was, so it could never discover clustering.
+- **`w_yield`** — lets a tile holding 6 units outrank one holding 1.
+
+Both default to `0.0`, so they are inert until the search turns them on — the
+ablation is built in.
+
+`w_dist` is **frozen at 1.0**. Multiplying every weight by a constant leaves the
+argmin unchanged, so the space has a redundant dimension the search would
+otherwise wander along forever.
+
+Defaults were meant to reproduce v6 exactly, but don't: candidates are now
+scanned row-major with plants last rather than grouped by priority bucket, so
+**ties break differently**. Worth 16-0 and a consistent +$145. Both orderings are
+arbitrary; kept the better one.
+
+---
+
+## v8 — tuned weights
+
+150-iteration hill climb on seeds 0-5, validated on seeds 500-519:
+
+| Seed set | Games | Win rate | Margin | p |
+|---|---|---|---|---|
+| Train (0-5) | 12 | 100% | +$1,260 | 0.0005 |
+| **Held-out (500-519)** | **40** | **100%** | **+$1,280** | **0.0000** |
+
+**No measurable overfitting** — the held-out margin is slightly *higher* than
+training. Only 11 of 150 candidate steps were accepted, so the search had little
+opportunity to chase noise.
+
+| Param | Hand-picked | Tuned |
+|---|---|---|
+| `w_water_urgent` | 2.0 | **5.69** |
+| `w_harvest_decay` | 4.0 | **3.19** |
+| `w_harvest_ripe` | 6.0 | 5.51 |
+| `w_water_routine` | 8.0 | 8.32 |
+| `w_plant` | 10.0 | 9.93 |
+| `w_dig` | 12.0 | 11.09 |
+| `w_shed` | 0.0 | **−1.42** |
+| `w_yield` | 0.0 | **0.0 → deleted** |
+
+**The headline finding contradicts v1's hand-reasoning.** `w_water_urgent` went
+*up*, demoting "rescue a dying plant" from first priority to roughly third, below
+harvesting a decaying one.
+
+That ordering was originally justified with a melon: $80 of seed and nine days of
+watering, one day away from $1,500 of yield. But **we farm wheat** — a $10 seed
+on a 4-day cycle, replaceable almost immediately on a farm that is already full.
+Walking across the farm to rescue one is a bad trade. The search found that; we
+hadn't. Note the reasoning wasn't wrong, it was *applied to the wrong crop* — and
+it would become right again the moment a melon plot exists.
+
+`w_shed` settled at **−1.42**, the opposite sign from the clustering hypothesis.
+Its main effect appears not to be spatial: at that magnitude it drags the
+effective plant score negative for distant tiles, which promotes **planting in
+general** rather than choosing between locations.
+
+`w_yield` never moved across ~30 mutation attempts and was **deleted** — a
+feature measured to earn nothing, rather than one argued away.
+
+---
+
+## Method
+
+From v7 onward, changes are accepted only on evidence:
+
+1. **Metric is win rate**, not money — the leaderboard is Elo, so a $1 win counts
+   the same as a $50,000 one.
+2. **Paired comparison** — both agents play identical seeds (common random
+   numbers) from both seats, so weather, weed spawns and shop unlocks cancel out
+   of the comparison rather than swamping it.
+3. **Binomial p-value** — a result is significant or it is explicitly not
+   shippable. No eyeballing.
+4. **Held-out seeds** — tune on one range, validate on another, or a long search
+   fits the quirks of the tuning seeds rather than the game.
+5. **Ablation** — a feature starts at 0.0 and stays only if the search turns it
+   on.
 
 ---
 

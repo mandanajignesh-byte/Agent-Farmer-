@@ -11,7 +11,8 @@ reads the game state and returns one action.
 
 ```
 main.py       the agent (submission entry point)
-bench.py      multi-seed benchmark harness
+bench.py      paired head-to-head benchmark with a significance test
+tune.py       hill climber over the scoring weights
 VERSIONS.md   what each version changed, and what it scored
 NOTES.md      derived game economics - the reasoning behind the strategy
 TOOLKIT.md    the learning-toolkit README this repo was started from
@@ -61,7 +62,7 @@ python bench.py 15 starter
 ## Submitting
 
 ```bash
-kaggle competitions submit kaggriculture -f main.py -m "v6 hands + weed clearing"
+kaggle competitions submit kaggriculture -f main.py -m "v8 tuned weights"
 ```
 
 5 submissions/day; only the latest 2 stay active. Ranking is Elo-style across
