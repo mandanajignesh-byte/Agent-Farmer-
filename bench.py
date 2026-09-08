@@ -20,6 +20,7 @@ a long enough search will fit the quirks of the tuning seeds rather than the
 game.
 """
 import math
+import multiprocessing as mp
 import statistics
 import sys
 
@@ -35,29 +36,44 @@ def two_sided_binomial_p(wins, decisive):
     return min(1.0, 2 * cumulative)
 
 
+def _play(job):
+    """One episode. Returns our money minus theirs, or None if either crashed."""
+    challenger, champion, seed, swapped, steps = job
+    lineup = [champion, challenger] if swapped else [challenger, champion]
+
+    env = make("kaggriculture", configuration={"episodeSteps": steps, "seed": seed})
+    env.run(lineup)
+
+    rewards = [s.reward for s in env.steps[-1]]
+    if any(r is None for r in rewards):
+        return None
+    mine, theirs = (rewards[1], rewards[0]) if swapped else (rewards[0], rewards[1])
+    return mine - theirs
+
+
 def duel(challenger, champion, n_seeds=20, seed_offset=0, steps=720):
+    jobs = [
+        (challenger, champion, seed, swapped, steps)
+        for seed in range(seed_offset, seed_offset + n_seeds)
+        for swapped in (False, True)
+    ]
+    with mp.Pool(min(8, mp.cpu_count())) as pool:
+        results = pool.map(_play, jobs)
+
     wins = losses = ties = errors = 0
     margins = []
-
-    for seed in range(seed_offset, seed_offset + n_seeds):
-        for swapped in (False, True):
-            lineup = [champion, challenger] if swapped else [challenger, champion]
-            env = make("kaggriculture", configuration={"episodeSteps": steps, "seed": seed})
-            env.run(lineup)
-
-            rewards = [s.reward for s in env.steps[-1]]
-            if any(r is None for r in rewards):
-                errors += 1
-                continue
-
-            mine, theirs = (rewards[1], rewards[0]) if swapped else (rewards[0], rewards[1])
-            margins.append(mine - theirs)
-            if mine > theirs:
-                wins += 1
-            elif mine < theirs:
-                losses += 1
-            else:
-                ties += 1
+    for margin in results:
+        if margin is None:
+            errors += 1
+        elif margin > 0:
+            wins += 1
+            margins.append(margin)
+        elif margin < 0:
+            losses += 1
+            margins.append(margin)
+        else:
+            ties += 1
+            margins.append(margin)
 
     return {
         "wins": wins,

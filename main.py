@@ -120,25 +120,35 @@ def _score(candidate, wx, wy, board_size):
 
 
 def _assign_actions(obs, farm, private):
-    """One action per worker, farmer first. Claimed tiles leave the pool so no
-    two workers walk to the same tile."""
+    """One action per worker. Repeatedly takes the best (worker, tile) pair
+    available anywhere, rather than letting workers pick in a fixed order - the
+    farmer choosing first could otherwise take a tile a hand was standing on and
+    send that hand walking."""
     board_size = len(farm["tiles"])
     workers = [tuple(farm["farmer"])] + [tuple(h) for h in farm["hands"]]
     pool = _candidates(obs, farm, private)
 
-    actions = []
-    for wx, wy in workers:
-        if not pool:
-            actions.append([PASS])
-            continue
+    actions = [[PASS] for _ in workers]
+    waiting = set(range(len(workers)))
 
-        index = min(range(len(pool)), key=lambda i: _score(pool[i], wx, wy, board_size))
-        _key, action, tx, ty, _units = pool.pop(index)
+    while waiting and pool:
+        best = None
+        for w in waiting:
+            wx, wy = workers[w]
+            for c, candidate in enumerate(pool):
+                score = _score(candidate, wx, wy, board_size)
+                if best is None or score < best[0]:
+                    best = (score, w, c)
+
+        _score_, w, c = best
+        wx, wy = workers[w]
+        _key, action, tx, ty, _units = pool.pop(c)
+        waiting.discard(w)
 
         if (tx, ty) != (wx, wy):
-            actions.append([_step_toward(wx, wy, tx, ty)])
+            actions[w] = [_step_toward(wx, wy, tx, ty)]
         else:
-            actions.append([action, CROP] if action == PLANT else [action])
+            actions[w] = [action, CROP] if action == PLANT else [action]
 
     return actions[0], actions[1:]
 
