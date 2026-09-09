@@ -10,8 +10,9 @@ a 100 MiB limit. This is a rule-based agent: a function called once per turn tha
 reads the game state and returns one action.
 
 ```
-main.py       the agent (submission entry point)
+main.py       the agent (submission entry point, self-contained)
 bench.py      paired head-to-head benchmark with a significance test
+check_submission.py  run main.py in isolation, exactly as Kaggle does
 tune.py       hill climber over the scoring weights
 LEARNING_PLAN.md  what to work through, and in what order
 VERSIONS.md   what each version changed, and what it scored

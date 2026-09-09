@@ -7,7 +7,69 @@ wins; workers claim tiles one at a time so no two walk to the same place.
 All tuneable behaviour lives in PARAMS so the weights can be searched rather
 than hand-picked - see tune.py. The defaults below reproduce v6 exactly.
 """
-import market
+import math
+
+
+# ---------------------------------------------------------------------------
+# Market price model, validated against 270 real price points with zero error.
+# Inlined rather than imported: a submission is a single main.py with no
+# sibling modules on the path, so `import market` fails there while working
+# perfectly in local testing.
+# ---------------------------------------------------------------------------
+
+
+MARKET_I0 = 10_000
+
+# base, T, below_func, below_target, above_func, above_target
+MARKET_PARAMS = {
+    "WHEAT": (25, 400, "sqrt", 0.80, "log", 0.20),
+    "CARROT": (35, 450, "hinge", 1.00, "sqrt", 0.70),
+    "TOMATO": (60, 200, "hinge", 0.40, "sqrt", 0.60),
+    "STRAWBERRY": (120, 100, "sqrt", 0.70, "linear", 1.60),
+    "MELON": (250, 300, "log", 0.20, "sq", 3.60),
+    "EGG": (50, 332, "hinge", 0.40, "log", 0.20),
+    "MILK": (160, 122, "sqrt", 0.60, "linear", 1.60),
+    "WOOL": (200, 105, "log", 0.20, "sq", 3.20),
+    "FERTILIZER": (100, 200, "linear", 0.40, "linear", 0.40),
+}
+
+SHAPES = {
+    "linear": lambda x, t: x,
+    "sq": lambda x, t: x * x,
+    "sqrt": lambda x, t: math.sqrt(x),
+    "log": lambda x, t: math.log(1 + x),
+    "log10": lambda x, t: math.log10(1 + x),
+    "hinge": lambda x, t: (x / t) + 8 * max(0.0, x / t - 1) ** 2,
+}
+
+
+def price_at(product, inventory):
+    """Price when market inventory sits at `inventory`. Scarcity raises it,
+    glut lowers it, and the two sides use different curves - wheat barely sags
+    on glut but spikes on scarcity, while melon does the opposite."""
+    if product not in MARKET_PARAMS:
+        return 0
+    base, t, below_func, below_target, above_func, above_target = MARKET_PARAMS[product]
+    gap = abs(inventory - MARKET_I0)
+    if gap == 0:
+        return base
+
+    scarce = inventory < MARKET_I0
+    func, target = (below_func, below_target) if scarce else (above_func, above_target)
+    shape = SHAPES[func]
+    amp = target * base / shape(t, t)
+    move = amp * shape(gap, t)
+    return max(1, round(base + move if scarce else base - move))
+
+
+def revenue_for(product, inventory, units):
+    """Total takings for selling `units`, priced one at a time as the price
+    falls. This is what a marginal tile is actually worth, not units * quote."""
+    total = 0
+    for i in range(int(units)):
+        total += price_at(product, inventory + i)
+    return total
+
 
 TURNS_PER_DAY = 24
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
@@ -79,7 +141,7 @@ def crop_value(crop, inventory, pending, days_left=None):
         # age >= MAX_YIELD_DAY, so it would never be picked even partially.
         # The seed is simply spent.
         return -seed_cost
-    revenue = market.revenue_for(crop, inventory.get(crop, market.I0) + pending, yield_units)
+    revenue = revenue_for(crop, inventory.get(crop, MARKET_I0) + pending, yield_units)
     actions = 1 + 1 / days  # a watering a day, plus the harvest at the end
     return (revenue - seed_cost) / days - PARAMS["w_action_cost"] * actions
 
