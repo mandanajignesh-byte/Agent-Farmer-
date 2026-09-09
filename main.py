@@ -39,6 +39,41 @@ LAND_LAST_DAY = 20
 WATER, HARVEST, PLANT, DIG, PASS = "WATER", "HARVEST", "PLANT", "DIG", "PASS"
 WEED = "WEED"
 
+SEASON_DAYS = 30
+
+# (yield without fertilizer, seed cost, days to reach that yield)
+CROP_SPEC = {
+    "WHEAT": (4, 10, 4),
+    "CARROT": (3, 20, 3),
+    "TOMATO": (4, 50, 11),
+    "STRAWBERRY": (4, 100, 16),
+    "MELON": (6, 80, 10),
+}
+
+# (purchase price, product sold, days between yields)
+ANIMAL_SPEC = {
+    "GOOSE": (300, "EGG", 1),
+    "COW": (400, "MILK", 2),
+    "SHEEP": (500, "WOOL", 3),
+}
+
+
+def crop_value(crop, prices):
+    """Profit per tile per day, at today's price rather than the table's."""
+    yield_units, seed_cost, days = CROP_SPEC[crop]
+    return (yield_units * prices.get(crop, 0) - seed_cost) / days
+
+
+def animal_value(animal, prices, days_left):
+    """Profit per tile per day, with the purchase amortised over the season that
+    is left. Late in the game that term explodes and the value goes negative, so
+    the agent stops buying without needing a cutoff date - it stops exactly at
+    the payback period."""
+    cost, product, interval = ANIMAL_SPEC[animal]
+    income = prices.get(product, 0) / interval
+    feed = prices.get("WHEAT", 25)  # bought, not grown - tiles cost actions
+    return income - feed - cost / max(days_left, 1)
+
 # Lower score wins. The first six were hardcoded priority levels 1-6 scaled by
 # the old PRIORITY_WEIGHT of 2; there was never a reason for them to be evenly
 # spaced integers, so they are now searchable.
