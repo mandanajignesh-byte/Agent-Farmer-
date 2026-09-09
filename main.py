@@ -107,11 +107,11 @@ CROP_SPEC = {
     "MELON": (6, 80, 10),
 }
 
-# (purchase price, product sold, days between yields)
+# (purchase price, product sold, days between yields, max units held)
 ANIMAL_SPEC = {
-    "GOOSE": (300, "EGG", 1),
-    "COW": (400, "MILK", 2),
-    "SHEEP": (500, "WOOL", 3),
+    "GOOSE": (300, "EGG", 1, 4),
+    "COW": (400, "MILK", 2, 6),
+    "SHEEP": (500, "WOOL", 3, 6),
 }
 
 
@@ -157,16 +157,22 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
     dozen animals produces hundreds of units over a season and drives its own
     prices down. Fertilizer especially - no town shop consumes it, so the only
     thing draining that market is other players buying."""
-    cost, product, interval = ANIMAL_SPEC[animal]
+    cost, product, interval, max_held = ANIMAL_SPEC[animal]
     inventory = inventory or {}
     shed = shed or {}
 
     # what our existing herd will still add before this animal's output lands
     made_per_animal = max(days_left, 0)
-    prod_pending = shed.get(product, 0) + herd * made_per_animal / interval
+    prod_pending = shed.get(product, 0) + herd * made_per_animal * (1 + interval) / interval
     fert_pending = shed.get("FERTILIZER", 0) + herd * made_per_animal
 
-    produce = revenue_for(product, inventory.get(product, MARKET_I0) + prod_pending, 1) / interval
+    # CARE banks one unit a day and pays the whole bank out on the next
+    # production, so an animal cared for every day yields 1 + interval per
+    # interval instead of 1 - triple for a cow, four times for a sheep. Capped
+    # by max_held, which the bank cannot exceed.
+    per_event = min(1 + interval, max_held)
+    units = revenue_for(product, inventory.get(product, MARKET_I0) + prod_pending, per_event)
+    produce = units / interval
     # Every surviving animal yields one fertilizer a day, free, fed or not -
     # and fertilizer's base price of $100 makes that stream comparable to the
     # milk. Valuing an animal on its product alone undercounts it by about
@@ -174,7 +180,7 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
     fertilizer = revenue_for(
         "FERTILIZER", inventory.get("FERTILIZER", MARKET_I0) + fert_pending, 1)
     feed = prices.get("WHEAT", 25)  # bought, not grown - tiles cost actions
-    actions = 2 + 1 / interval  # feed and collect daily, harvest each interval
+    actions = 3 + 1 / interval  # feed, care and collect daily; harvest each interval
     return (produce + fertilizer - feed - cost / max(days_left, 1)
             - PARAMS["w_action_cost"] * actions)
 
@@ -192,6 +198,7 @@ PARAMS = {
     "w_plant": 10.623,
     "w_dig": 10.988,
     "w_dist": 1.0,
+    "w_dist_sq": 0.0,
     # PLANT only. Where an existing plant sits is already fixed, but choosing
     # where to plant fixes every future trip to that tile.
     "w_shed": -0.499,
@@ -200,6 +207,7 @@ PARAMS = {
     "w_feed": 0.562,
     "w_harvest_animal": 3.5,
     "w_collect": 3.5,
+    "w_care": 3.0,
     "w_place": -0.02,
     "w_build": 12.283,
     "w_pickup": 8.238,
@@ -363,6 +371,11 @@ def _pen_jobs(obs, tile, x, y):
         return jobs
     if not tile["fed_today"]:
         jobs.append(("w_feed", ["FEED"], x, y, 0, "WHEAT"))
+    # Caring a fed animal banks a unit that pays out on its next production -
+    # roughly $160-200 for one action, the best return of anything on the farm.
+    # The bank is only credited if the animal is also fed that day.
+    if not tile["cared_today"]:
+        jobs.append(("w_care", ["CARE"], x, y, 0, None))
     if tile["yield_units"] > 0:
         jobs.append(("w_harvest_animal", [HARVEST], x, y, tile["yield_units"], None))
     # One fertilizer per animal per day, free, produced whether or not it was
@@ -381,7 +394,12 @@ def _shed_tiles(board_size):
 
 def _score(candidate, wx, wy, board_size):
     key, _action, x, y, _units, _needs = candidate
-    score = PARAMS[key] + PARAMS["w_dist"] * _distance(wx, wy, x, y)
+    d = _distance(wx, wy, x, y)
+    # Linear is well motivated - walking N steps costs exactly N actions, with
+    # no economy of scale. The quadratic term tests whether a long trip carries
+    # extra risk the linear cost cannot express: over ten turns of walking,
+    # plants dry out and another worker may take the target first.
+    score = PARAMS[key] + PARAMS["w_dist"] * d + PARAMS["w_dist_sq"] * d * d
     if key == "w_plant":
         score += PARAMS["w_shed"] * _shed_distance(x, y, board_size)
     elif key == "w_build":
