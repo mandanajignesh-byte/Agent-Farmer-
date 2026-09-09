@@ -81,7 +81,58 @@ def analyse(path):
     print(f"  largest 3-day swing: ${biggest_swing:,.0f} around day {swing_day}")
 
 
+def summarise(paths):
+    """One line per game, then the aggregate that matters."""
+    rows = []
+    for path in paths:
+        replay = json.load(open(path))
+        names = replay["info"]["TeamNames"]
+        mine = names.index(ME) if ME in names else 1
+        theirs = 1 - mine
+        final = [e.get("reward") or 0 for e in replay["steps"][-1]]
+        crops, animals, pens, _ = _census(
+            replay["steps"][-1][0]["observation"]["farms"][theirs])
+        rows.append({
+            "opponent": names[theirs],
+            "me": final[mine],
+            "them": final[theirs],
+            "won": final[mine] > final[theirs],
+            "animals": sum(animals.values()),
+            "pens": pens,
+            "crops": sum(crops.values()),
+        })
+
+    rows.sort(key=lambda r: -r["them"])
+    print(f"\n{'result':<7}{'opponent':<24}{'me':>9}{'them':>9}{'animals':>9}{'pens':>6}{'crops':>7}")
+    print("-" * 71)
+    for r in rows:
+        print(f"{'WIN' if r['won'] else 'LOSS':<7}{r['opponent'][:23]:<24}"
+              f"{r['me']:>9,.0f}{r['them']:>9,.0f}{r['animals']:>9}{r['pens']:>6}{r['crops']:>7}")
+
+    with_animals = [r for r in rows if r["animals"] > 0]
+    without = [r for r in rows if r["animals"] == 0]
+    my_scores = sorted(r["me"] for r in rows)
+
+    def record(group):
+        wins = sum(r["won"] for r in group)
+        return f"{wins}W-{len(group) - wins}L" if group else "none"
+
+    print(f"\n  overall            {record(rows)}   ({len(rows)} games)")
+    print(f"  vs agents WITH animals    {record(with_animals)}")
+    print(f"  vs agents WITHOUT animals {record(without)}")
+    if with_animals:
+        print(f"\n  their score, with animals    "
+              f"${sum(r['them'] for r in with_animals) / len(with_animals):>9,.0f} avg")
+    if without:
+        print(f"  their score, without animals ${sum(r['them'] for r in without) / len(without):>9,.0f} avg")
+    print(f"\n  our score: min ${my_scores[0]:,.0f}  median ${my_scores[len(my_scores) // 2]:,.0f}"
+          f"  max ${my_scores[-1]:,.0f}")
+
+
 if __name__ == "__main__":
-    targets = sys.argv[1:] or sorted(glob.glob("replays/*.json"))
-    for path in targets:
-        analyse(path)
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    targets = args or sorted(glob.glob("replays/*.json"))
+    if "--each" in sys.argv:
+        for path in targets:
+            analyse(path)
+    summarise(targets)
