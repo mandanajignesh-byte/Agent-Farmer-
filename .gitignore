@@ -4,3 +4,4 @@ __pycache__/
 replay*.json
 tuned_params.json
 champion.py
+replays/
