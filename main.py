@@ -500,7 +500,14 @@ def _market_orders(obs, farm, private):
         key=lambda c: crop_value(c, inventory, pending_units(farm, private, c), days_left),
         reverse=True,
     )
+    # Only buy seed for a crop still worth planting. crop_value goes negative
+    # once a crop cannot mature before the season ends, and the planting loop
+    # already refuses those - but the buying did not, so the agent kept
+    # stocking seed it could never use. Roughly $1,000 of dead stock by turn
+    # 720, when unsold inventory scores nothing.
     for crop in ranked[:2]:
+        if crop_value(crop, inventory, pending_units(farm, private, crop), days_left) <= 0:
+            continue
         shortfall = SEED_BUFFER - private["seeds"].get(crop, 0)
         if shortfall > 0 and farm["money"] > SEED_COST[crop] * shortfall * 2:
             orders.append(["BUY_SEED", crop, shortfall])
