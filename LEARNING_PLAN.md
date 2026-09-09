@@ -294,3 +294,48 @@ that — search tunes what it is given.
 benchmark, because our champion does not compete for the same crops, and to
 matter only against real opponents. Jignesh expects the real gains from animals
 and from widening the crop mix beyond wheat and melon.
+
+---
+
+## Negative result: replacing the land and hiring constants
+
+`MAX_QUADRANTS = 3` and `HANDS_PER_DAY = 8` are hand-picked numbers, swept once
+against a v10-era agent, and the argument for replacing them with a computed
+decision is the same one that paid off for crop mix and for animals. It was
+tried, four ways, and every version lost badly.
+
+The design keyed both off one observable — is there more work than workers?
+
+    more jobs than workers        -> labour-limited, hire
+    workers idle, no free tiles   -> tile-limited, buy land
+    workers idle, tiles free      -> neither; seed- or cash-limited
+
+| Attempt | Result vs v18 |
+|---|---|
+| Hire to close the queue each turn | -$58,672 |
+| Divide the queue by turns left in the day | -$8,490 |
+| Sweep the worker throughput rate (0.15-0.6) | -$7,305 at best |
+| Size the crew from tiles under management | -$18,410 |
+
+**Why it failed.** Hands vanish at midnight, so the hiring call has to be made at
+dawn for the whole day. The instantaneous queue is a bad proxy: it is large at
+dawn and collapses by mid-morning once the watering round is done, so the crew
+is sized from a number that stops being true an hour later. Worse, the two rules
+interact badly - an understaffed farm is never idle, and idleness was the
+precondition for buying land, so the agent stayed on one quadrant and earned too
+little to hire its way out. Money reached $133 by day 6 in one trace.
+
+**The honest reading.** "Let the algorithm decide" beat hand-picked constants
+for crop mix (+$16,585) and for animals, and lost here. The difference is not the
+principle, it is whether the model of the decision is good enough. A computed
+decision is only better than a tuned constant when the formula captures what
+actually drives the outcome - and none of these four captured the dawn timing or
+the coupling between the two rules.
+
+Also worth noting: one attempt crashed with UnboundLocalError from day 5 onward
+and still reported DONE with $139, because kaggle-environments swallows a
+per-turn exception and substitutes a default action. That is the third time this
+session a silent failure looked like a plausible score.
+
+Reverted. The constants stay, now documented as tuned empirically rather than
+reasoned - and still worth another attempt with a better model of dawn demand.
