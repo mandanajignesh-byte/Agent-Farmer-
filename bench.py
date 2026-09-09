@@ -19,8 +19,10 @@ Tune on one seed range and validate on a different one (pass a seed_offset), or
 a long enough search will fit the quirks of the tuning seeds rather than the
 game.
 """
+import hashlib
 import math
 import multiprocessing as mp
+import os
 import statistics
 import sys
 
@@ -86,6 +88,20 @@ def duel(challenger, champion, n_seeds=20, seed_offset=0, steps=720):
     }
 
 
+def _fingerprint(path):
+    """Short hash of an agent file, printed with every result.
+
+    Twice now a stale champion.py has produced a false reading - once a copy
+    that still imported a deleted module and scored its $3,000 starting money,
+    once a version behind the change being measured, which credited the
+    previous version's gain to the current one. The margin alone cannot show
+    either. A fingerprint makes it obvious what was actually compared."""
+    if not os.path.exists(path):
+        return "builtin"
+    with open(path, "rb") as f:
+        return hashlib.sha1(f.read()).hexdigest()[:8]
+
+
 def report(result, challenger, champion):
     games = result["games"]
     decisive = result["wins"] + result["losses"]
@@ -100,7 +116,8 @@ def report(result, challenger, champion):
         verdict = "SIGNIFICANT - challenger is WORSE"
 
     print(
-        f"{challenger}  vs  {champion}\n"
+        f"{challenger} [{_fingerprint(challenger)}]  vs  "
+        f"{champion} [{_fingerprint(champion)}]\n"
         f"  {games} games ({result['wins']}W {result['losses']}L {result['ties']}T)\n"
         f"  win rate     {rate:.1f}%\n"
         f"  mean margin  ${result['mean_margin']:+,.0f}\n"
