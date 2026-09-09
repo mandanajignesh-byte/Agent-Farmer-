@@ -81,13 +81,13 @@ BONUS_START = {crop: (day + 1) // 2 for crop, day in MAX_YIELD_DAY.items()}
 
 HANDS_PER_DAY = 8
 SEED_BUFFER = HANDS_PER_DAY + 2
-# Quadrants cost 1k, 2k, 4k. Buying land is a measured LOSS at current
-# movement efficiency - 12 seeds, mean vs starter:
-#            hands=6   hands=8  hands=10
-#   1 quad   $11,048   $10,128    $7,445
-#   2 quads   $9,555   $10,765    $9,237
-# Labour is capped by fib cost and ~65% of every turn is already walking,
-# so 25 tiles is past the optimum. Raise this only if movement improves.
+# Quadrants cost 1k, 2k, 4k. Land lost money at v6 and won +$6,590 at v10 -
+# nothing about the price changed, the agent got good enough to work the tiles.
+# Three quadrants and eight hands were swept together, since the two are
+# coupled: optimal staffing rises with area, and four quadrants loses at every
+# staffing level because fib cost caps the workforce before 100 tiles can be
+# tended. Still hardcoded, and still worth replacing with a value computed from
+# spare labour the way crops and animals now are.
 MAX_QUADRANTS = 3
 LAND_RESERVE = 500
 LAND_LAST_DAY = 20
@@ -147,18 +147,32 @@ def crop_value(crop, inventory, pending, days_left=None):
     return (revenue - seed_cost) / days - PARAMS["w_action_cost"] * actions
 
 
-def animal_value(animal, prices, days_left):
+def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
     """Profit per tile per day, with the purchase amortised over the season that
     is left. Late in the game that term explodes and the value goes negative, so
     the agent stops buying without needing a cutoff date - it stops exactly at
-    the payback period."""
+    the payback period.
+
+    Income is priced marginally, the same way crop_value does it: a herd of a
+    dozen animals produces hundreds of units over a season and drives its own
+    prices down. Fertilizer especially - no town shop consumes it, so the only
+    thing draining that market is other players buying."""
     cost, product, interval = ANIMAL_SPEC[animal]
-    produce = prices.get(product, 0) / interval
+    inventory = inventory or {}
+    shed = shed or {}
+
+    # what our existing herd will still add before this animal's output lands
+    made_per_animal = max(days_left, 0)
+    prod_pending = shed.get(product, 0) + herd * made_per_animal / interval
+    fert_pending = shed.get("FERTILIZER", 0) + herd * made_per_animal
+
+    produce = revenue_for(product, inventory.get(product, MARKET_I0) + prod_pending, 1) / interval
     # Every surviving animal yields one fertilizer a day, free, fed or not -
     # and fertilizer's base price of $100 makes that stream comparable to the
     # milk. Valuing an animal on its product alone undercounts it by about
     # half, which is why the herd never grew.
-    fertilizer = prices.get("FERTILIZER", 100)
+    fertilizer = revenue_for(
+        "FERTILIZER", inventory.get("FERTILIZER", MARKET_I0) + fert_pending, 1)
     feed = prices.get("WHEAT", 25)  # bought, not grown - tiles cost actions
     actions = 2 + 1 / interval  # feed and collect daily, harvest each interval
     return (produce + fertilizer - feed - cost / max(days_left, 1)
@@ -192,8 +206,6 @@ PARAMS = {
     # Pens are serviced every day, so where one is built fixes its running cost
     # for the rest of the season - the same argument as w_shed for planting.
     "w_pen_shed": 1.096,
-    # A restock trip is worth more the hungrier the herd is.
-    "w_unfed": 0.0,
     # What a worker-action is worth. Charged against every tile use so a crop
     # (about 1 action/day) and an animal (about 2.5) compete on equal terms.
     "w_action_cost": 0.0,
@@ -280,8 +292,10 @@ def _candidates(obs, farm, private):
     budget = {c: seeds.get(c, 0) for c in CROP_SPEC}
 
     prices = obs["market"]["prices"]
-    best_animal = max(ANIMAL_SPEC, key=lambda a: animal_value(a, prices, days_left))
-    animal_worth = animal_value(best_animal, prices, days_left)
+    _av = lambda a: animal_value(a, prices, days_left, inventory,
+                                 animals_placed, private["shed"])
+    best_animal = max(ANIMAL_SPEC, key=_av)
+    animal_worth = _av(best_animal)
 
     # A pen only pays once an animal stands in it, so build them a couple ahead
     # of demand rather than covering the farm in empty structures.
@@ -357,15 +371,13 @@ def _shed_tiles(board_size):
     return [(cx, cy) for cx in (half - 1, half) for cy in (half - 1, half)]
 
 
-def _score(candidate, wx, wy, board_size, unfed=0):
+def _score(candidate, wx, wy, board_size):
     key, _action, x, y, _units, _needs = candidate
     score = PARAMS[key] + PARAMS["w_dist"] * _distance(wx, wy, x, y)
     if key == "w_plant":
         score += PARAMS["w_shed"] * _shed_distance(x, y, board_size)
     elif key == "w_build":
         score += PARAMS["w_pen_shed"] * _shed_distance(x, y, board_size)
-    elif key == "w_pickup":
-        score -= PARAMS["w_unfed"] * unfed
     return score
 
 
@@ -378,8 +390,6 @@ def _assign_actions(obs, farm, private):
     workers = [tuple(farm["farmer"])] + [tuple(h) for h in farm["hands"]]
     carrying = private.get("inventories") or [{}] * len(workers)
     pool = _candidates(obs, farm, private)
-    unfed = sum(1 for row in farm["tiles"] for t in row
-                if isinstance(t, dict) and t.get("animal") and not t["fed_today"])
 
     actions = [[PASS] for _ in workers]
     waiting = set(range(len(workers)))
@@ -392,7 +402,7 @@ def _assign_actions(obs, farm, private):
             for c, candidate in enumerate(pool):
                 if candidate[5] and not held.get(candidate[5], 0):
                     continue
-                score = _score(candidate, wx, wy, board_size, unfed)
+                score = _score(candidate, wx, wy, board_size)
                 if best is None or score < best[0]:
                     best = (score, w, c)
 
@@ -443,9 +453,12 @@ def _market_orders(obs, farm, private):
     empty_pens = sum(1 for t in pens if not t.get("animal"))
     livestock = len(pens) - empty_pens
 
-    best_animal = max(ANIMAL_SPEC, key=lambda a: animal_value(a, prices, days_left))
+    inventory = obs["market"]["inventory"]
+    _av = lambda a: animal_value(a, prices, days_left, inventory,
+                                 livestock, private["shed"])
+    best_animal = max(ANIMAL_SPEC, key=_av)
     waiting = sum(private["shed"].get(a, 0) for a in ANIMAL_SPEC)
-    if (animal_value(best_animal, prices, days_left) > 0 and empty_pens > waiting
+    if (_av(best_animal) > 0 and empty_pens > waiting
             and farm["money"] > ANIMAL_SPEC[best_animal][0] + 500):
         orders.append(["BUY_ANIMAL", best_animal, 1])
 
@@ -456,10 +469,6 @@ def _market_orders(obs, farm, private):
         if want > 0 and farm["money"] > prices.get("WHEAT", 25) * want * 2:
             orders.append(["BUY_PRODUCT", "WHEAT", want])
 
-
-
-    inventory = obs["market"]["inventory"]
-    days_left = SEASON_DAYS - obs["day"]
     ranked = sorted(
         CROP_SPEC,
         key=lambda c: crop_value(c, inventory, pending_units(farm, private, c), days_left),
