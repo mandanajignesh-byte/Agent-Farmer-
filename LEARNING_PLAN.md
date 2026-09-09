@@ -339,3 +339,35 @@ session a silent failure looked like a plausible score.
 
 Reverted. The constants stay, now documented as tuned empirically rather than
 reasoned - and still worth another attempt with a better model of dawn demand.
+
+---
+
+## Negative result: tuning w_build and w_action_cost together
+
+After v22 fixed feeding, two hypotheses looked live. Both were wrong.
+
+**That the pen ceiling was a symptom of starvation.** Every pen experiment before
+v22 ran on a farm that could not feed what it already had, so those results
+arguably measured the feeding bug rather than pen economics. They did not:
+`w_build=4` still loses -$5,055 with feeding fixed. More pens genuinely cost more
+than they return, most likely because each displaces a crop tile and adds daily
+chores. The herd size v22 reaches is close to right.
+
+**That w_action_cost was masking the cost of livestock.** An animal needs about
+3.5 actions a day against a crop's one, and charging nothing for that seemed to
+explain why aggressive building collapsed. Charging for it is worse at every
+value tried. Third time this parameter has measured dead.
+
+Grid, margin against v22 over 8 seeds:
+
+|            | cost=0  | cost=10 | cost=25  |
+|------------|---------|---------|----------|
+| build=4    | -$5,055 | -$4,798 | -$12,193 |
+| **build=8**| **+$3** | -$9,040 | -$3,581  |
+| build=12   | -$1,070 | -$7,834 | -$3,035  |
+
+Worth noting the pattern that made both hypotheses tempting: four times this
+project a result stopped being true once the system changed around it, so
+"re-test it now" has been a reliable instinct. It is not a guarantee. Some
+results are stable, and the only way to tell is to measure again rather than
+assume the earlier finding has expired.
