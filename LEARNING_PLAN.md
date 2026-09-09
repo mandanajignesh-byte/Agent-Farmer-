@@ -165,3 +165,29 @@ says far more than *that* they did.
 
 If a session produces a working change but you could not explain it afterwards,
 it did not go well.
+
+---
+
+## Candidate improvements found while studying
+
+Things spotted by reading the code rather than by measurement. Untested — each
+needs a held-out benchmark before it ships.
+
+**Urgent watering outranks harvesting a decaying plant.** In `_candidates`, the
+`consecutive_unwatered >= 1` branch fires before the `decaying` branch, without
+checking whether watering still earns anything. Watering only adds yield inside
+the bonus window (days 2-4 for wheat), so a plant at age 6 that is both dying and
+decaying gets watered — spending an action to preserve a plant whose yield is
+shrinking, instead of banking that yield now.
+
+Worth noting the tuner could never find this: it adjusts the *weights*, while
+this is a flaw in the *conditions*. No weight value fixes a branch that should
+not have fired. The search can tune what you give it; it cannot restructure the
+logic.
+
+**The opponent's farm is never read.** `farms[1 - obs["player"]]` is fully
+visible every turn — their crops, their money, their land — and the agent ignores
+it entirely. Since crops take days to mature, seeing 40 tiles of wheat planted on
+day 3 predicts a price crash around day 7, giving four days to sell ahead of it
+and to plant something else. This directly attacks what the replays showed:
+wheat at $19 while strawberry sat at $252.
