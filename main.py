@@ -7,15 +7,9 @@ wins; workers claim tiles one at a time so no two walk to the same place.
 All tuneable behaviour lives in PARAMS so the weights can be searched rather
 than hand-picked - see tune.py. The defaults below reproduce v6 exactly.
 """
+import market
 
 TURNS_PER_DAY = 24
-STAPLE = "WHEAT"
-# Melon earns ~$142/tile/day against wheat's $35, but its glut curve is brutal:
-# price = 250 * (1 - 3.6*(x/300)^2), hitting the $1 floor around 158 units above
-# I0, and no town shop ever consumes one. At ~18 melons per tile per season that
-# caps the plot at roughly 8-9 tiles however much land we own.
-PREMIUM = "MELON"
-PREMIUM_TILES = 14
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
 # Watering only adds yield from half-way to max yield onward. Before that it is
@@ -58,10 +52,35 @@ ANIMAL_SPEC = {
 }
 
 
-def crop_value(crop, prices):
-    """Profit per tile per day, at today's price rather than the table's."""
+def pending_units(farm, private, crop):
+    """What we are already committed to selling of this crop - shed stock plus
+    the expected yield of everything currently in the ground. A new tile's
+    output arrives behind all of it, so that is the inventory level it gets
+    priced at."""
+    units = private["shed"].get(crop, 0)
+    for row in farm["tiles"]:
+        for tile in row:
+            if isinstance(tile, dict) and tile.get("kind") == PLANT and tile["crop"] == crop:
+                units += CROP_SPEC[tile["crop"]][0]
+    return units
+
+
+def crop_value(crop, inventory, pending, days_left=None):
+    """Profit per tile per day for ONE MORE tile of this crop, pricing its yield
+    unit by unit as it pushes the price down.
+
+    This is what makes tile counts self-balancing: plant more melon and melon's
+    marginal value falls until carrot overtakes it, then wheat overtakes carrot.
+    No target count has to be chosen, and the mix re-balances on its own if an
+    opponent floods a market."""
     yield_units, seed_cost, days = CROP_SPEC[crop]
-    return (yield_units * prices.get(crop, 0) - seed_cost) / days
+    if days_left is not None and days_left < days:
+        # Cannot mature before the season ends, and we only harvest at
+        # age >= MAX_YIELD_DAY, so it would never be picked even partially.
+        # The seed is simply spent.
+        return -seed_cost
+    revenue = market.revenue_for(crop, inventory.get(crop, market.I0) + pending, yield_units)
+    return (revenue - seed_cost) / days
 
 
 def animal_value(animal, prices, days_left):
@@ -122,7 +141,7 @@ def _candidates(obs, farm, private):
     seeds = private["seeds"]
     can_plant = TURNS_PER_DAY - hour >= 2
 
-    found, plantable, premium_grown = [], [], 0
+    found, plantable = [], []
     for y, row in enumerate(farm["tiles"]):
         for x, tile in enumerate(row):
             if tile == "LOCKED":
@@ -138,8 +157,6 @@ def _candidates(obs, farm, private):
                 continue
             if tile.get("kind") != PLANT:
                 continue
-            if tile["crop"] == PREMIUM:
-                premium_grown += 1
 
             lifespan = tile["max_lifespan_step"]
             decaying = lifespan != -1 and step >= lifespan
@@ -161,16 +178,26 @@ def _candidates(obs, farm, private):
     # Planting more tiles in a turn than we hold seeds for makes every PLANT
     # that turn fail, not just the surplus ones - so each planned planting must
     # be backed by a seed we actually have.
-    budget = {
-        PREMIUM: min(max(0, PREMIUM_TILES - premium_grown), seeds.get(PREMIUM, 0)),
-        STAPLE: seeds.get(STAPLE, 0),
-    }
+    inventory = obs["market"]["inventory"]
+    days_left = SEASON_DAYS - obs["day"]
+    pending = {c: pending_units(farm, private, c) for c in CROP_SPEC}
+    budget = {c: seeds.get(c, 0) for c in CROP_SPEC}
+
     for x, y in plantable:
-        crop = PREMIUM if budget[PREMIUM] else STAPLE if budget[STAPLE] else None
-        if crop is None:
+        affordable = [c for c in CROP_SPEC if budget[c] > 0]
+        best = max(
+            affordable,
+            key=lambda c: crop_value(c, inventory, pending[c], days_left),
+            default=None,
+        )
+        # Nothing left that can mature in time - stop planting entirely and
+        # leave the workers free to harvest and sell.
+        if best is None or crop_value(best, inventory, pending[best], days_left) <= 0:
             break
-        budget[crop] -= 1
-        found.append(("w_plant", PLANT, x, y, 0, crop))
+        budget[best] -= 1
+        # this tile's own output crowds the next one
+        pending[best] += CROP_SPEC[best][0]
+        found.append(("w_plant", PLANT, x, y, 0, best))
     return found
 
 
@@ -228,15 +255,16 @@ def _market_orders(obs, farm, private):
 
     orders += [["SELL", item, qty] for item, qty in private["shed"].items() if qty > 0]
 
-    grown = sum(
-        1
-        for row in farm["tiles"]
-        for tile in row
-        if isinstance(tile, dict) and tile.get("crop") == PREMIUM
+    inventory = obs["market"]["inventory"]
+    days_left = SEASON_DAYS - obs["day"]
+    ranked = sorted(
+        CROP_SPEC,
+        key=lambda c: crop_value(c, inventory, pending_units(farm, private, c), days_left),
+        reverse=True,
     )
-    for crop, want in ((PREMIUM, PREMIUM_TILES - grown), (STAPLE, SEED_BUFFER)):
-        shortfall = min(want, SEED_BUFFER) - private["seeds"].get(crop, 0)
-        if shortfall > 0 and farm["money"] > SEED_COST[crop] * shortfall:
+    for crop in ranked[:2]:
+        shortfall = SEED_BUFFER - private["seeds"].get(crop, 0)
+        if shortfall > 0 and farm["money"] > SEED_COST[crop] * shortfall * 2:
             orders.append(["BUY_SEED", crop, shortfall])
 
     return orders[:10]
