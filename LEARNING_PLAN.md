@@ -371,3 +371,57 @@ project a result stopped being true once the system changed around it, so
 "re-test it now" has been a reliable instinct. It is not a guarantee. Some
 results are stable, and the only way to tell is to measure again rather than
 assume the earlier finding has expired.
+
+---
+
+## CMA-ES and the distance shape: two answers, one of them uncomfortable
+
+### The distance term is linear, as suspected
+
+`w_dist_sq` moved from 0.00 to 0.04 across 25 generations - essentially nothing.
+Jignesh predicted it would grow, on the reasoning that a long walk carries risk a
+linear cost cannot express. It does not. Walking N steps costs exactly N actions,
+and global assignment already pairs near workers with near jobs, so genuinely
+long trips are too rare for a quadratic term to act on. The simple model was
+right.
+
+### CMA-ES found nothing, and nearly convinced us otherwise
+
+Twenty-five generations over 19 weights, about 2,400 episodes:
+
+| Seed range | Result |
+|---|---|
+| Training (0-5) | **+$8,271** |
+| Held-out 500-519 | +$2,983, p=0.0064 - looks solid |
+| Held-out 3000-19 | -$1,233, p=0.43 |
+| Held-out 4000-29 | -$73, p=0.37 |
+
+Pooled held-out: **80W-60L over 140 games, p=0.11. Nothing.**
+
+**The methodological finding matters more than the result.** We have been treating
+a single held-out range as proof. Here the first one said +$2,983 at p=0.0064 -
+comfortably significant by our own bar - and it was luck. Shipping on it would
+have been shipping noise.
+
+Two rules follow:
+
+  Training margin overstates by roughly 3x, consistently, across both hill
+  climbing (+$11,652 -> +$3,652) and CMA-ES (+$8,271 -> nothing).
+
+  One held-out range is not enough. Two independent ranges minimum, and a third
+  when they disagree.
+
+That puts a question mark over earlier single-range validations. CARE was
+confirmed on two ranges and v22 on three, so those stand. Thinner ones should be
+re-checked before being trusted.
+
+### What this says about where the gains are
+
+Three separate searches now - a hill climb, a grid, and CMA-ES - have found
+nothing at v22's weights. Meanwhile every large gain this project has produced
+came from structure rather than tuning: the crop mix (+$16,585), CARE (+$9,342),
+fertilizer collection (+$6,000), parallel feeding (+$3,500). Each was a thing the
+agent could not do at all, not a number set slightly wrong.
+
+The weights are probably close to as good as this feature set allows. Further
+effort belongs in auditing what the agent still cannot do.
