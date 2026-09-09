@@ -80,7 +80,8 @@ def crop_value(crop, inventory, pending, days_left=None):
         # The seed is simply spent.
         return -seed_cost
     revenue = market.revenue_for(crop, inventory.get(crop, market.I0) + pending, yield_units)
-    return (revenue - seed_cost) / days
+    actions = 1 + 1 / days  # a watering a day, plus the harvest at the end
+    return (revenue - seed_cost) / days - PARAMS["w_action_cost"] * actions
 
 
 def animal_value(animal, prices, days_left):
@@ -89,39 +90,49 @@ def animal_value(animal, prices, days_left):
     the agent stops buying without needing a cutoff date - it stops exactly at
     the payback period."""
     cost, product, interval = ANIMAL_SPEC[animal]
-    income = prices.get(product, 0) / interval
+    produce = prices.get(product, 0) / interval
+    # Every surviving animal yields one fertilizer a day, free, fed or not -
+    # and fertilizer's base price of $100 makes that stream comparable to the
+    # milk. Valuing an animal on its product alone undercounts it by about
+    # half, which is why the herd never grew.
+    fertilizer = prices.get("FERTILIZER", 100)
     feed = prices.get("WHEAT", 25)  # bought, not grown - tiles cost actions
-    return income - feed - cost / max(days_left, 1)
+    actions = 2 + 1 / interval  # feed and collect daily, harvest each interval
+    return (produce + fertilizer - feed - cost / max(days_left, 1)
+            - PARAMS["w_action_cost"] * actions)
 
 # Lower score wins. The first six were hardcoded priority levels 1-6 scaled by
 # the old PRIORITY_WEIGHT of 2; there was never a reason for them to be evenly
 # spaced integers, so they are now searchable.
 PARAMS = {
-    "w_water_urgent": 5.994,
-    "w_harvest_decay": 3.188,
-    "w_harvest_ripe": 5.514,
+    "w_water_urgent": 5.907,
+    "w_harvest_decay": 2.157,
+    "w_harvest_ripe": 4.517,
     # Watering inside the bonus window earns a unit of yield; outside it, on a
     # plant in no danger, it earns nothing and only costs the walk.
-    "w_water_bonus": 8.316,
+    "w_water_bonus": 7.903,
     "w_water_idle": 30.0,
-    "w_plant": 10.498,
-    "w_dig": 11.086,
+    "w_plant": 10.623,
+    "w_dig": 10.988,
     "w_dist": 1.0,
     # PLANT only. Where an existing plant sits is already fixed, but choosing
     # where to plant fixes every future trip to that tile.
-    "w_shed": -1.418,
+    "w_shed": -0.499,
     # An unfed animal is gone permanently and cost $300-500, so feeding
     # outranks everything a crop can ask for.
-    "w_feed": 2.0,
+    "w_feed": 0.562,
     "w_harvest_animal": 3.5,
-    "w_place": 3.0,
-    "w_build": 10.0,
-    "w_pickup": 6.0,
+    "w_place": -0.02,
+    "w_build": 12.283,
+    "w_pickup": 8.238,
     # Pens are serviced every day, so where one is built fixes its running cost
     # for the rest of the season - the same argument as w_shed for planting.
-    "w_pen_shed": 0.0,
+    "w_pen_shed": 1.096,
     # A restock trip is worth more the hungrier the herd is.
     "w_unfed": 0.0,
+    # What a worker-action is worth. Charged against every tile use so a crop
+    # (about 1 action/day) and an animal (about 2.5) compete on equal terms.
+    "w_action_cost": 0.0,
 }
 
 

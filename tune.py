@@ -37,13 +37,13 @@ STEP = {
     "w_plant": 1.0,
     "w_dig": 1.0,
     "w_shed": 0.4,
+    "w_action_cost": 3.0,
     "w_feed": 1.0,
     "w_harvest_animal": 1.0,
     "w_place": 1.0,
     "w_build": 1.5,
     "w_pickup": 1.5,
     "w_pen_shed": 0.5,
-    "w_unfed": 0.5,
 }
 
 
