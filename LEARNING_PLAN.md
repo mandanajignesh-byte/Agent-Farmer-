@@ -232,3 +232,18 @@ existing weights already encode.
 Note this is a change to the *shape* of the formula, not to a weight — the same
 category as the branch-ordering flaw above. The search can only tune what it is
 given; deciding what to give it is the part that has to be reasoned.
+
+**Seed buffer may throttle early growth.** We buy up to `SEED_BUFFER =
+HANDS_PER_DAY + 2` (currently 10) seeds at a time, but the farm has 75 tiles to
+fill. Empty tiles compound — a tile idle on day 3 loses its whole first cycle —
+so if planting is seed-limited rather than action-limited in the opening days,
+raising the buffer is nearly free. Measure whether plant candidates are being
+capped by seeds before changing it.
+
+**Workers are never dispersed deliberately.** All workers respawn at the shed
+each morning (forced by the game) and fan out with nothing stopping them
+crisscrossing. Global assignment gives some of this implicitly by pairing near
+workers with near jobs, but there is no notion of a worker owning a region.
+Explicit zoning might cut travel further — though note the v9 finding that
+movement is largely inherent rather than wasteful, so the ceiling here may be
+low.
