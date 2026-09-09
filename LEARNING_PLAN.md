@@ -219,7 +219,15 @@ Then tune. Ablation decides it: if `w_dist_sq` stays at 0.0 the linear model was
 right and the term gets deleted, exactly as `w_yield` and `w_sticky` were. If it
 grows, long trips deserve a disproportionate penalty.
 
-**Prediction (write before running):** _to be filled in_
+**Prediction, recorded 2026-09-09 before running.** Jignesh: `w_dist_sq` will
+grow — long walks are riskier because there is always plenty else to be doing, so
+the opportunity cost of a long trip is worse than the steps alone suggest.
+
+Claude: uncertain, leaning toward it staying near zero. Global assignment already
+matches close workers to close jobs, so genuinely long trips may be rare enough
+that the quadratic term has little to act on. If it does grow, the interesting
+question is whether it is capturing risk or just re-expressing something the
+existing weights already encode.
 
 Note this is a change to the *shape* of the formula, not to a weight â€” the same
 category as the branch-ordering flaw above. The search can only tune what it is
