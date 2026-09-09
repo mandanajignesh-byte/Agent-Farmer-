@@ -271,14 +271,22 @@ def _candidates(obs, farm, private):
             ripe = obs["day"] - tile["planted_day"] >= MAX_YIELD_DAY[tile["crop"]]
             units = tile["yield_units"]
 
-            if tile["consecutive_unwatered"] >= 1 and not tile["watered_today"]:
+            # Rescue only pays while watering still earns something. Past the
+            # bonus window a dying plant's yield no longer grows, so spending an
+            # action to keep it alive preserves a shrinking number - banking the
+            # harvest now is strictly better. Watering on the max-yield day
+            # itself still adds a unit, so the window is inclusive.
+            age = obs["day"] - tile["planted_day"]
+            water_earns = age <= MAX_YIELD_DAY[tile["crop"]]
+            dying = tile["consecutive_unwatered"] >= 1 and not tile["watered_today"]
+
+            if dying and (water_earns or units == 0):
                 found.append(("w_water_urgent", [WATER], x, y, 0, None))
             elif units > 0 and decaying:
                 found.append(("w_harvest_decay", [HARVEST], x, y, units, None))
             elif units > 0 and ripe:
                 found.append(("w_harvest_ripe", [HARVEST], x, y, units, None))
             elif not tile["watered_today"]:
-                age = obs["day"] - tile["planted_day"]
                 earning = BONUS_START[tile["crop"]] <= age <= MAX_YIELD_DAY[tile["crop"]]
                 key = "w_water_bonus" if earning else "w_water_idle"
                 found.append((key, [WATER], x, y, 0, None))
