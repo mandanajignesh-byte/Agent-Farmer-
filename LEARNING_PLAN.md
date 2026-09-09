@@ -247,3 +247,50 @@ workers with near jobs, but there is no notion of a worker owning a region.
 Explicit zoning might cut travel further — though note the v9 finding that
 movement is largely inherent rather than wasteful, so the ceiling here may be
 low.
+
+---
+
+## Session 3 — from constants to a value function
+
+The hardcoded allocation constants (`PREMIUM_TILES`, `MAX_QUADRANTS`,
+`LAND_LAST_DAY`, `HANDS_PER_DAY`) were each tuned against our own champion under
+one set of conditions, and none of them adapt. If an opponent floods melon the
+price collapses sooner and 14 tiles is wrong; if wheat trades at $19 the whole
+ranking shifts. The agent cannot tell, because the number is baked in.
+
+Replacing all of them with one formula, applied uniformly:
+
+```
+value of a tile use = income/day - running cost/day - (capital / days remaining)
+```
+
+Prices read live from `obs["market"]["prices"]`; capital amortised over the
+season that remains.
+
+**Why the amortisation term matters.** A cow costs $400 and nets $55/day:
+
+| Bought on | Days left | Amortised | Value/day |
+|---|---|---|---|
+| Day 2 | 28 | $14.29 | +$40.71 |
+| Day 24 | 6 | $66.67 | -$11.67 |
+
+The agent stops buying animals near the end with no cutoff date written
+anywhere, and it stops at 400/55 = 7.3 days remaining — exactly the payback
+period, derived rather than tuned.
+
+**Land needs one extra input.** Cost per remaining day versus what the tiles
+earn is not enough; that is why the same purchase lost money at v6 and made
+$6,590 at v10. Land only pays if there is spare labour, so it is gated on the
+farm being full *and* workers idling.
+
+**The limit of this approach.** It does not remove assumptions, it moves them.
+"Plant melon until 14" is an assumption; "value = price x yield / days" is also
+one. The gain is that a formula reacts to conditions where a constant cannot.
+Something must still decide what goes into the formula, and no search can do
+that — search tunes what it is given.
+
+**Predictions, recorded before building.** Both of us expect replacing
+`PREMIUM_TILES` with a live-price calculation to be roughly neutral in our own
+benchmark, because our champion does not compete for the same crops, and to
+matter only against real opponents. Jignesh expects the real gains from animals
+and from widening the crop mix beyond wheat and melon.
