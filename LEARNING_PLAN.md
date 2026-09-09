@@ -191,3 +191,36 @@ it entirely. Since crops take days to mature, seeing 40 tiles of wheat planted o
 day 3 predicts a price crash around day 7, giving four days to sell ahead of it
 and to plant something else. This directly attacks what the replays showed:
 wheat at $19 while strawberry sat at $252.
+
+---
+
+## Experiment queued: is the distance term the right shape?
+
+Raised by Jignesh while working through `_score`. Distance is currently linear —
+one step costs exactly one unit, and `w_dist` is frozen at 1.0 so every other
+weight is denominated in walking steps.
+
+The case for linear: walking N steps really does cost N actions. There is no
+economy of scale in walking, so the cost is genuinely linear in the game's own
+currency.
+
+The case against: a long walk carries risk a short one does not. Over ten turns
+of walking, other plants dry out, jobs become urgent, and another worker may
+reach the target first. That risk plausibly grows faster than linearly, which a
+linear term cannot express.
+
+**The test.** Add a second distance term, inert at zero:
+
+```python
+score = PARAMS[key] + PARAMS["w_dist"] * d + PARAMS["w_dist_sq"] * d**2
+```
+
+Then tune. Ablation decides it: if `w_dist_sq` stays at 0.0 the linear model was
+right and the term gets deleted, exactly as `w_yield` and `w_sticky` were. If it
+grows, long trips deserve a disproportionate penalty.
+
+**Prediction (write before running):** _to be filled in_
+
+Note this is a change to the *shape* of the formula, not to a weight — the same
+category as the branch-ordering flaw above. The search can only tune what it is
+given; deciding what to give it is the part that has to be reasoned.
