@@ -93,6 +93,7 @@ LAND_RESERVE = 500
 LAND_LAST_DAY = 20
 
 WATER, HARVEST, PLANT, DIG, PASS = "WATER", "HARVEST", "PLANT", "DIG", "PASS"
+COLLECT = "COLLECT_FERTILIZER"
 WEED = "WEED"
 
 SEASON_DAYS = 30
@@ -184,6 +185,7 @@ PARAMS = {
     # outranks everything a crop can ask for.
     "w_feed": 0.562,
     "w_harvest_animal": 3.5,
+    "w_collect": 3.5,
     "w_place": -0.02,
     "w_build": 12.283,
     "w_pickup": 8.238,
@@ -341,6 +343,12 @@ def _pen_jobs(obs, tile, x, y):
         jobs.append(("w_feed", ["FEED"], x, y, 0, "WHEAT"))
     if tile["yield_units"] > 0:
         jobs.append(("w_harvest_animal", [HARVEST], x, y, tile["yield_units"], None))
+    # One fertilizer per animal per day, free, produced whether or not it was
+    # fed. It does NOT accumulate - miss a day and that unit is gone - and at a
+    # $100 base it is worth more per unit than milk. animal_value has been
+    # counting this income all along; until now nothing ever collected it.
+    if tile.get("fertilizer_available"):
+        jobs.append(("w_collect", [COLLECT], x, y, 0, None))
     return jobs
 
 

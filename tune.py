@@ -40,6 +40,7 @@ STEP = {
     "w_action_cost": 3.0,
     "w_feed": 1.0,
     "w_harvest_animal": 1.0,
+    "w_collect": 1.0,
     "w_place": 1.0,
     "w_build": 1.5,
     "w_pickup": 1.5,
