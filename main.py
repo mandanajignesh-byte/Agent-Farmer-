@@ -211,7 +211,7 @@ PARAMS = {
     "w_care": 3.0,
     "w_drop": 4.0,
     "w_place": -0.02,
-    "w_build": 12.283,
+    "w_build": 8.0,
     "w_pickup": 8.238,
     # Pens are serviced every day, so where one is built fixes its running cost
     # for the rest of the season - the same argument as w_shed for planting.
@@ -360,9 +360,14 @@ def _candidates(obs, farm, private):
             sx, sy = _shed_tiles(board)[0]
             found.append(("w_drop", [DROP], sx, sy, 0, item))
     carried = sum(inv.get("WHEAT", 0) for inv in (private.get("inventories") or []))
-    if unfed > carried and shed.get("WHEAT", 0) > 0:
-        sx, sy = _shed_tiles(board)[0]
-        found.append(("w_pickup", ["PICKUP", "WHEAT", max(unfed, 1)], sx, sy, 0, None))
+    # One fetch per turn meant a single worker carried the whole herd's feed and
+    # walked it round every pen. As the herd grew, animals starved waiting -
+    # six escaped in a season at seven animals, $400 each plus their output.
+    # Offer a trip per shed-access tile so several workers can share the round.
+    hungry = unfed - carried
+    if hungry > 0 and shed.get("WHEAT", 0) > 0:
+        for sx, sy in _shed_tiles(board)[:min(4, hungry)]:
+            found.append(("w_pickup", ["PICKUP", "WHEAT", max(hungry, 1)], sx, sy, 0, None))
     for animal in ANIMAL_SPEC:
         if shed.get(animal, 0) > 0 and empty_pens:
             sx, sy = _shed_tiles(board)[0]
