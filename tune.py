@@ -43,6 +43,7 @@ STEP = {
     "w_harvest_animal": 1.0,
     "w_collect": 1.0,
     "w_care": 1.0,
+    "w_drop": 1.0,
     "w_place": 1.0,
     "w_build": 1.5,
     "w_pickup": 1.5,

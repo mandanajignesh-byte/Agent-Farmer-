@@ -94,6 +94,7 @@ LAND_LAST_DAY = 20
 
 WATER, HARVEST, PLANT, DIG, PASS = "WATER", "HARVEST", "PLANT", "DIG", "PASS"
 COLLECT = "COLLECT_FERTILIZER"
+DROP = "DROP"
 WEED = "WEED"
 
 SEASON_DAYS = 30
@@ -208,6 +209,7 @@ PARAMS = {
     "w_harvest_animal": 3.5,
     "w_collect": 3.5,
     "w_care": 3.0,
+    "w_drop": 4.0,
     "w_place": -0.02,
     "w_build": 12.283,
     "w_pickup": 8.238,
@@ -344,6 +346,19 @@ def _candidates(obs, farm, private):
     # tile. Collect a full day's feed at once so one walk covers the herd.
     shed = private["shed"]
     board = len(farm["tiles"])
+
+    # SELL draws from the shed, and a worker's inventory only reaches the shed
+    # at end of day - after which, on the final day, there is no turn left to
+    # sell it. Anything still being carried then scores nothing, so on the last
+    # day it is worth walking it in. One candidate per item type actually held,
+    # so only a worker carrying that item takes the job.
+    if obs["day"] >= SEASON_DAYS - 1:
+        held = set()
+        for inv in (private.get("inventories") or []):
+            held.update(k for k, v in inv.items() if v > 0 and k in MARKET_PARAMS)
+        for item in held:
+            sx, sy = _shed_tiles(board)[0]
+            found.append(("w_drop", [DROP], sx, sy, 0, item))
     carried = sum(inv.get("WHEAT", 0) for inv in (private.get("inventories") or []))
     if unfed > carried and shed.get("WHEAT", 0) > 0:
         sx, sy = _shed_tiles(board)[0]
