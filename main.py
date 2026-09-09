@@ -117,6 +117,11 @@ PARAMS = {
     "w_place": 3.0,
     "w_build": 10.0,
     "w_pickup": 6.0,
+    # Pens are serviced every day, so where one is built fixes its running cost
+    # for the rest of the season - the same argument as w_shed for planting.
+    "w_pen_shed": 0.0,
+    # A restock trip is worth more the hungrier the herd is.
+    "w_unfed": 0.0,
 }
 
 
@@ -271,11 +276,15 @@ def _shed_tiles(board_size):
     return [(cx, cy) for cx in (half - 1, half) for cy in (half - 1, half)]
 
 
-def _score(candidate, wx, wy, board_size):
+def _score(candidate, wx, wy, board_size, unfed=0):
     key, _action, x, y, _units, _needs = candidate
     score = PARAMS[key] + PARAMS["w_dist"] * _distance(wx, wy, x, y)
     if key == "w_plant":
         score += PARAMS["w_shed"] * _shed_distance(x, y, board_size)
+    elif key == "w_build":
+        score += PARAMS["w_pen_shed"] * _shed_distance(x, y, board_size)
+    elif key == "w_pickup":
+        score -= PARAMS["w_unfed"] * unfed
     return score
 
 
@@ -288,6 +297,8 @@ def _assign_actions(obs, farm, private):
     workers = [tuple(farm["farmer"])] + [tuple(h) for h in farm["hands"]]
     carrying = private.get("inventories") or [{}] * len(workers)
     pool = _candidates(obs, farm, private)
+    unfed = sum(1 for row in farm["tiles"] for t in row
+                if isinstance(t, dict) and t.get("animal") and not t["fed_today"])
 
     actions = [[PASS] for _ in workers]
     waiting = set(range(len(workers)))
@@ -300,7 +311,7 @@ def _assign_actions(obs, farm, private):
             for c, candidate in enumerate(pool):
                 if candidate[5] and not held.get(candidate[5], 0):
                     continue
-                score = _score(candidate, wx, wy, board_size)
+                score = _score(candidate, wx, wy, board_size, unfed)
                 if best is None or score < best[0]:
                     best = (score, w, c)
 
