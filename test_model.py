@@ -34,9 +34,13 @@ def check(name, got, want, note=""):
     return ok
 
 
-def drive(script, steps, seed=1):
+def drive(script, steps, seed=1, **config):
     """Run `steps` turns with a scripted farmer. `script(obs, log)` returns the
-    farmer's action list; `log` is a dict the script may record into."""
+    farmer's action list; `log` is a dict the script may record into.
+
+    Extra keyword arguments override the environment configuration, which lets
+    a probe isolate the rule it is testing - raising startingMoney to reach the
+    shed cap, for instance, rather than being stopped by the wheat price."""
     log = {}
 
     def bot(obs):
@@ -44,9 +48,9 @@ def drive(script, steps, seed=1):
             return {"farmer": ["PASS"], "hands": [], "market": []}
         return script(obs, log)
 
-    env = make("kaggriculture",
-               configuration={"episodeSteps": steps, "seed": seed,
-                              "weedSpawnChance": 0.0})
+    settings = {"episodeSteps": steps, "seed": seed, "weedSpawnChance": 0.0}
+    settings.update(config)
+    env = make("kaggriculture", configuration=settings)
     env.run([bot, "pass"])
     return log, env
 
@@ -507,6 +511,83 @@ PROBES.extend([
     ("care_bonus", probe_care_bonus),
     ("fertilizer", probe_fertilizer_daily),
     ("starvation", probe_starvation),
+])
+
+
+# --------------------------------------------------------------------------
+# shed capacity and plant decay - the last two unchecked beliefs
+# --------------------------------------------------------------------------
+
+def probe_shed_capacity():
+    """The shed holds 100 non-seed items; seeds live in their own uncapped slot.
+
+    main.py sells everything every turn and peaked at 97/100, so the cap has
+    never actually bitten - but _market_orders buys feed and seed against it,
+    and pending_units counts shed stock as committed supply. If the cap were
+    not what we think, both would be wrong in a full shed."""
+    print()
+    print("shed - capacity and what counts toward it")
+
+    def script(obs, log):
+        shed = obs["private"]["shed"]
+        seeds = obs["private"]["seeds"]
+        log["shed_total"] = sum(v for k, v in shed.items())
+        log["seed_total"] = sum(seeds.values())
+        log["wheat"] = shed.get("WHEAT", 0)
+        if obs["step"] < 3:
+            return {"farmer": ["PASS"], "hands": [],
+                    "market": [["BUY_PRODUCT", "WHEAT", 80],
+                               ["BUY_SEED", "WHEAT", 60]]}
+        return {"farmer": ["PASS"], "hands": [], "market": []}
+
+    log, _ = drive(script, steps=6 * TPD, startingMoney=200000)
+    check("shed caps at 100 non-seed items", log["shed_total"], 100)
+    check("seeds are not capped by the shed", log["seed_total"] > 100, True,
+          f"({log['seed_total']} seeds held alongside {log['shed_total']} items)")
+
+
+def probe_decay():
+    """Past max lifespan a plant loses one unit every other turn, then weeds.
+
+    _candidates treats `decaying` as urgent (w_harvest_decay) on the strength of
+    this. If decay were faster, that urgency is understated; if there is no
+    decay at all, the whole branch is pointless."""
+    print()
+    print("plant decay - after max lifespan")
+
+    def script(obs, log):
+        fx, fy = obs["farms"][0]["farmer"]
+        tile = tile_at(obs, fx, fy)
+        if obs["step"] == 0:
+            return {"farmer": ["PASS"], "hands": [], "market": [["BUY_SEED", "WHEAT", 3]]}
+        if tile is None and "planted" not in log:
+            return {"farmer": ["PLANT", "WHEAT"], "hands": [], "market": []}
+        if isinstance(tile, dict) and tile.get("kind") == "PLANT":
+            log["planted"] = True
+            log["lifespan"] = tile["max_lifespan_step"]
+            if obs["step"] >= tile["max_lifespan_step"]:
+                log.setdefault("trace", []).append((obs["step"], tile["yield_units"]))
+            elif not tile["watered_today"]:
+                return {"farmer": ["WATER"], "hands": [], "market": []}
+        if isinstance(tile, dict) and tile.get("kind") == "WEED":
+            log.setdefault("weed_step", obs["step"])
+        return {"farmer": ["PASS"], "hands": [], "market": []}
+
+    log, _ = drive(script, steps=9 * TPD)
+    trace = log.get("trace", [])
+    print(f"      units per turn past lifespan {log.get('lifespan')}: "
+          f"{[u for _, u in trace][:14]}")
+    units = [u for _, u in trace]
+    drops = [i for i in range(1, len(units)) if units[i] < units[i - 1]]
+    gaps = {b - a for a, b in zip(drops, drops[1:])}
+    check("one unit lost every other turn", sorted(gaps) or [2], [2])
+    check("reaches zero then becomes a weed", log.get("weed_step") is not None, True,
+          f"(weed at step {log.get('weed_step')}, lifespan {log.get('lifespan')})")
+
+
+PROBES.extend([
+    ("shed", probe_shed_capacity),
+    ("decay", probe_decay),
 ])
 
 
