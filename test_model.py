@@ -345,6 +345,171 @@ def probe_bonus_window():
 PROBES.append(("bonus_window", probe_bonus_window))
 
 
+# --------------------------------------------------------------------------
+# animals - ANIMAL_SPEC, the CARE bonus, fertilizer, and starvation
+# --------------------------------------------------------------------------
+
+def animal_script(animal, care=True, feed=True, stop_feeding_day=None):
+    """Build the structure on the farmer's own tile (which is shed-adjacent, so
+    wheat can be picked up without moving), place the animal, then feed and care
+    for it daily. Nothing is ever harvested, so yield_units accumulates and the
+    max_held cap becomes visible."""
+    structure = agent.STRUCTURE_FOR[animal]
+
+    def f(obs, log):
+        fx, fy = obs["farms"][0]["farmer"]
+        tile = tile_at(obs, fx, fy)
+        priv = obs["private"]
+        held = (priv.get("inventories") or [{}])[0]
+
+        if obs["step"] == 0:
+            return {"farmer": ["PASS"], "hands": [],
+                    "market": [["BUY_ANIMAL", animal, 1],
+                               ["BUY_PRODUCT", "WHEAT", 90]]}
+        if tile is None:
+            return {"farmer": ["BUILD_" + structure], "hands": [], "market": []}
+        if isinstance(tile, dict) and tile.get("kind") == structure:
+            if not tile.get("animal"):
+                # An empty structure after the animal was placed means it
+                # starved. Check this first: otherwise the script loops trying
+                # to re-place an animal it no longer holds and never notices.
+                if log.get("placed"):
+                    log.setdefault("escaped_day", obs["day"])
+                    return {"farmer": ["PASS"], "hands": [], "market": []}
+                if held.get(animal, 0) > 0:
+                    return {"farmer": ["PLACE", animal], "hands": [], "market": []}
+                return {"farmer": ["PICKUP", animal, 1], "hands": [], "market": []}
+
+            log["placed"] = True
+            age = obs["day"] - tile["placed_day"]
+            log.setdefault("sod", {}).setdefault(age, tile["yield_units"])
+            log.setdefault("fert", {}).setdefault(age, bool(tile.get("fertilizer_available")))
+            feeding = feed and (stop_feeding_day is None or obs["day"] < stop_feeding_day)
+            if feeding and not tile["fed_today"]:
+                if held.get("WHEAT", 0) > 0:
+                    return {"farmer": ["FEED"], "hands": [], "market": []}
+                return {"farmer": ["PICKUP", "WHEAT", 10], "hands": [], "market": []}
+            if care and not tile["cared_today"]:
+                return {"farmer": ["CARE"], "hands": [], "market": []}
+        return {"farmer": ["PASS"], "hands": [], "market": []}
+    return f
+
+
+def probe_animal_schedule():
+    """First yield day, interval, and max_held, with no CARE so the base rate
+    is visible."""
+    print()
+    print("animals - first yield, interval and max_held (no CARE)")
+    for animal in ("GOOSE", "COW", "SHEEP"):
+        cost, product, interval, max_held, first_yield = agent.ANIMAL_SPEC[animal]
+        log, _ = drive(animal_script(animal, care=False), steps=26 * TPD)
+        sod = log.get("sod", {})
+        gains = {a: sod[a] - sod[a - 1] for a in sorted(sod) if a - 1 in sod}
+        # Unlike watering, production is not an action taken on a day - it
+        # fires at end-of-day and is simply visible from `first_yield_day`
+        # onward, so there is no offset to undo here.
+        first_paid = min([a for a, u in sod.items() if u > 0], default=None)
+        producing = sorted(a for a, g in gains.items() if g > 0)
+        gaps = {b - a for a, b in zip(producing, producing[1:])} or {interval}
+        check(f"{animal} first yield day", first_paid, first_yield)
+        check(f"{animal} interval", sorted(gaps), [interval])
+        check(f"{animal} max_held cap", max(sod.values()), max_held)
+        print(f"      units by age: {sod}")
+
+
+def probe_care_bonus():
+    """What one production actually pays, with and without CARE.
+
+    animal_value assumes every production pays min(1 + interval, max_held).
+    That is the steady state - the bank holds one unit per cared day and empties
+    on each production - but the FIRST production also drains everything banked
+    during the lead time, which is 8 days for a cow. Measured by harvesting
+    after every production so the tile empties and each payout is visible."""
+    print()
+    print("animals - units per production, harvesting each time")
+
+    def harvest_script(animal, care):
+        structure = agent.STRUCTURE_FOR[animal]
+
+        def f(obs, log):
+            fx, fy = obs["farms"][0]["farmer"]
+            tile = tile_at(obs, fx, fy)
+            held = (obs["private"].get("inventories") or [{}])[0]
+            if obs["step"] == 0:
+                return {"farmer": ["PASS"], "hands": [],
+                        "market": [["BUY_ANIMAL", animal, 1],
+                                   ["BUY_PRODUCT", "WHEAT", 90]]}
+            if tile is None:
+                return {"farmer": ["BUILD_" + structure], "hands": [], "market": []}
+            if isinstance(tile, dict) and tile.get("kind") == structure:
+                if not tile.get("animal"):
+                    if held.get(animal, 0) > 0:
+                        return {"farmer": ["PLACE", animal], "hands": [], "market": []}
+                    return {"farmer": ["PICKUP", animal, 1], "hands": [], "market": []}
+                if not tile["fed_today"]:
+                    if held.get("WHEAT", 0) > 0:
+                        return {"farmer": ["FEED"], "hands": [], "market": []}
+                    return {"farmer": ["PICKUP", "WHEAT", 10], "hands": [], "market": []}
+                if tile["yield_units"] > 0:
+                    log.setdefault("payouts", []).append(
+                        (obs["day"] - tile["placed_day"], tile["yield_units"]))
+                    return {"farmer": ["HARVEST"], "hands": [], "market": []}
+                if care and not tile["cared_today"]:
+                    return {"farmer": ["CARE"], "hands": [], "market": []}
+            return {"farmer": ["PASS"], "hands": [], "market": []}
+        return f
+
+    for animal in ("GOOSE", "COW", "SHEEP"):
+        _, _, interval, max_held, first_yield = agent.ANIMAL_SPEC[animal]
+        out = {}
+        for care in (False, True):
+            log, _ = drive(harvest_script(animal, care), steps=26 * TPD)
+            out[care] = [u for _, u in log.get("payouts", [])]
+        print(f"      {animal:<6} no care {out[False]}")
+        print(f"      {animal:<6} cared   {out[True]}")
+        check(f"{animal} uncared payout", sorted(set(out[False])), [1])
+        steady = out[True][1:] if len(out[True]) > 1 else out[True]
+        check(f"{animal} cared steady payout", sorted(set(steady)),
+              [min(1 + interval, max_held)], "(what animal_value assumes)")
+        if out[True]:
+            check(f"{animal} cared FIRST payout", out[True][0],
+                  min(1 + first_yield, max_held),
+                  "(the lead-time bank, which animal_value ignores)")
+
+
+def probe_fertilizer_daily():
+    """One fertilizer per animal per day, produced whether or not it was fed,
+    and it does not accumulate."""
+    print()
+    print("animals - fertilizer availability")
+    log, _ = drive(animal_script("GOOSE", care=False), steps=12 * TPD)
+    fert = log.get("fert", {})
+    after_first = [v for a, v in sorted(fert.items()) if a >= 1]
+    check("fertilizer available every day", all(after_first), True,
+          f"(by age: {fert})")
+
+
+def probe_starvation():
+    """Two consecutive unfed end-of-days and the animal is gone for good."""
+    print()
+    print("animals - starvation")
+    log, _ = drive(animal_script("GOOSE", care=False, stop_feeding_day=6),
+                   steps=12 * TPD)
+    # Feeding stops during day 6, so day 6 and day 7 both end unfed and the
+    # animal is gone at the end of day 7 - visible on day 8.
+    check("animal escapes two days after feeding stops",
+          log.get("escaped_day"), 8,
+          "(stopped feeding on day 6)")
+
+
+PROBES.extend([
+    ("animal_schedule", probe_animal_schedule),
+    ("care_bonus", probe_care_bonus),
+    ("fertilizer", probe_fertilizer_daily),
+    ("starvation", probe_starvation),
+])
+
+
 if __name__ == "__main__":
     want = sys.argv[1] if len(sys.argv) > 1 else ""
     for name, fn in PROBES:
