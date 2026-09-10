@@ -591,6 +591,114 @@ PROBES.extend([
 ])
 
 
+# --------------------------------------------------------------------------
+# market mechanics - what a sale actually pays
+# --------------------------------------------------------------------------
+
+def probe_sell_revenue():
+    """revenue_for() must equal the money a SELL actually produces.
+
+    Every value function in the agent ends here: crop_value and animal_value
+    both price their output with revenue_for, unit by unit as the price falls.
+    If the real market pays something else, every comparison the agent makes
+    between crops, animals and market timing is wrong by that difference."""
+    print()
+    print("market - SELL proceeds vs revenue_for()")
+
+    def script(product, qty):
+        def f(obs, log):
+            shed = obs["private"]["shed"]
+            farm = obs["farms"][0]
+            if obs["step"] < 2:
+                return {"farmer": ["PASS"], "hands": [],
+                        "market": [["BUY_PRODUCT", product, qty]]}
+            if shed.get(product, 0) >= qty and "sold_at" not in log:
+                log["sold_at"] = obs["step"]
+                log["money_before"] = farm["money"]
+                log["inv_before"] = obs["market"]["inventory"][product]
+                log["predicted"] = agent.revenue_for(
+                    product, obs["market"]["inventory"][product], qty)
+                return {"farmer": ["PASS"], "hands": [],
+                        "market": [["SELL", product, qty]]}
+            if log.get("sold_at") and obs["step"] == log["sold_at"] + 1:
+                log["money_after"] = farm["money"]
+            return {"farmer": ["PASS"], "hands": [], "market": []}
+        return f
+
+    for product, qty in (("WHEAT", 40), ("FERTILIZER", 25), ("WHEAT", 5)):
+        log, _ = drive(script(product, qty), steps=8 * TPD, startingMoney=200000)
+        got = log.get("money_after", 0) - log.get("money_before", 0)
+        check(f"SELL {qty} {product} pays revenue_for", got, log.get("predicted"),
+              f"(market inventory was {log.get('inv_before')})")
+
+
+def probe_price_floor():
+    """What can and cannot be checked about the $1 floor.
+
+    The rulebook says that at the floor a unit is still bought but is NOT added
+    to market inventory, so the floor stays responsive. That specific behaviour
+    resisted three attempts to exercise it, and the reasons are worth recording
+    rather than working around:
+
+      - a buy-then-sell round trip cannot reach it. The env quotes buys at
+        post-buy inventory precisely so a round trip nets zero, so a player can
+        only push inventory above I0 by actually producing goods.
+      - driving the real agent with wheat's glut curve steepened does not reach
+        it either, because crop_value stops planting a crop once its marginal
+        value collapses. The agent refuses to produce something worthless -
+        which is the crop mix working as designed, and is itself worth knowing.
+
+    So the floor-inventory rule stays UNVERIFIED, and this probe asserts only
+    what is actually reachable. The exposure is small: the agent prices with
+    price_at, which floors at 1 the same way, and the lowest price seen in a
+    real game is melon at about $34 - far above the floor."""
+    print()
+    print("market - price floor (partially verifiable, see docstring)")
+    steep = {"WHEAT": {"above_func": "sq", "above_target": 2500.0}}
+
+    def f(obs, log):
+        inv = obs["market"]["inventory"]["WHEAT"]
+        log.setdefault("trace", []).append((inv, obs["market"]["prices"]["WHEAT"]))
+        return agent.agent(obs)
+
+    log, _ = drive(f, steps=22 * TPD, marketParams=steep)
+    trace = log["trace"]
+    lowest = min(p for _, p in trace)
+    check("price never goes below 1", lowest >= 1, True,
+          f"(lowest reached {lowest})")
+    print(f"      NOT VERIFIED: behaviour exactly at the $1 floor - the agent "
+          f"stops producing a crop before it gets there (lowest {lowest})")
+
+
+def probe_order_cap():
+    """At most maxMarketOrdersPerTurn (10) orders are processed per player per
+    turn; extras are silently dropped. _market_orders truncates with [:10] on
+    exactly this basis."""
+    print()
+    print("market - the 10-order-per-turn cap")
+
+    def f(obs, log):
+        farm = obs["farms"][0]
+        if obs["step"] == 0:
+            log["money_before"] = farm["money"]
+            return {"farmer": ["PASS"], "hands": [],
+                    "market": [["HIRE"]] * 15}
+        if obs["step"] == 1:
+            log["hands"] = len(farm["hands"])
+        return {"farmer": ["PASS"], "hands": [["PASS"]] * len(farm["hands"]),
+                "market": []}
+
+    log, _ = drive(f, steps=3, startingMoney=200000)
+    check("only 10 of 15 HIRE orders processed", log.get("hands"), 10)
+
+
+PROBES.extend([
+    ("sell_revenue", probe_sell_revenue),
+    ("price_floor", probe_price_floor),
+    ("order_cap", probe_order_cap),
+])
+
+
 if __name__ == "__main__":
     want = sys.argv[1] if len(sys.argv) > 1 else ""
     for name, fn in PROBES:
