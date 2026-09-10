@@ -77,7 +77,16 @@ MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON
 # Watering only adds yield from half-way to max yield onward. Before that it is
 # pure survival, and survival tolerates every other day - so an early watering
 # on a healthy plant buys nothing at all.
-BONUS_START = {crop: (day + 1) // 2 for crop, day in MAX_YIELD_DAY.items()}
+#
+# The environment derives this window from ITS max_yield_day, which is not the
+# day we choose to harvest: melon caps at 6 units on day 10 so we pick then, but
+# the rulebook's max_yield_day is 12 and the window therefore opens at 6, not 5.
+# Deriving the window from MAX_YIELD_DAY above put melon's start a day early and
+# spent one wasted watering on every melon tile. Ongoing crops are absent on
+# purpose - watering never adds yield to them at all, it only keeps them alive,
+# which the `dying` rescue already covers. Every value here is probed against
+# the environment in test_model.py.
+BONUS_START = {"WHEAT": 2, "CARROT": 2, "MELON": 6}
 
 HANDS_PER_DAY = 8
 SEED_BUFFER = HANDS_PER_DAY + 2
@@ -89,7 +98,6 @@ SEED_BUFFER = HANDS_PER_DAY + 2
 # tended. Still hardcoded, and still worth replacing with a value computed from
 # spare labour the way crops and animals now are.
 MAX_QUADRANTS = 3
-LAND_RESERVE = 500
 LAND_LAST_DAY = 20
 
 WATER, HARVEST, PLANT, DIG, PASS = "WATER", "HARVEST", "PLANT", "DIG", "PASS"
@@ -108,11 +116,12 @@ CROP_SPEC = {
     "MELON": (6, 80, 10),
 }
 
-# (purchase price, product sold, days between yields, max units held)
+# (purchase price, product sold, days between yields, max units held,
+#  days from placement to first yield)
 ANIMAL_SPEC = {
-    "GOOSE": (300, "EGG", 1, 4),
-    "COW": (400, "MILK", 2, 6),
-    "SHEEP": (500, "WOOL", 3, 6),
+    "GOOSE": (300, "EGG", 1, 4, 4),
+    "COW": (400, "MILK", 2, 6, 8),
+    "SHEEP": (500, "WOOL", 3, 6, 6),
 }
 
 
@@ -158,7 +167,7 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
     dozen animals produces hundreds of units over a season and drives its own
     prices down. Fertilizer especially - no town shop consumes it, so the only
     thing draining that market is other players buying."""
-    cost, product, interval, max_held = ANIMAL_SPEC[animal]
+    cost, product, interval, max_held, first_yield = ANIMAL_SPEC[animal]
     inventory = inventory or {}
     shed = shed or {}
 
@@ -182,8 +191,40 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
         "FERTILIZER", inventory.get("FERTILIZER", MARKET_I0) + fert_pending, 1)
     feed = prices.get("WHEAT", 25)  # bought, not grown - tiles cost actions
     actions = 3 + 1 / interval  # feed, care and collect daily; harvest each interval
+
+    # An animal produces nothing for its first `first_yield` days - 4 for a
+    # goose, 6 for a sheep, 8 for a cow - but eats and takes actions from the
+    # day it is placed. Ignoring that overvalued every late purchase by its
+    # whole lead time: a cow bought on day 24 never yields once, and the old
+    # formula happily recommended it. Fertilizer is exempt, since a surviving
+    # animal drops one a day from the start whether it is producing or not.
+    productive = max(0, days_left - first_yield)
+    produce *= productive / max(days_left, 1)
+
     return (produce + fertilizer - feed - cost / max(days_left, 1)
             - PARAMS["w_action_cost"] * actions)
+
+def daily_burn(farm, private, prices, ranked, livestock):
+    """What the farm spends in a day at current prices.
+
+    Land is bought with the same dollars that buy seed, animals and feed, so
+    what is left after a purchase has to carry the farm until income arrives.
+    A flat $500 reserve did not: the agent bought land on turn one, fell to
+    $204 by day 3, and then wanted seed on 510 of 720 turns without being able
+    to pay for any of it. Income only arrived on day 12.
+
+    Every term is read from the game rather than assumed - hire cost from the
+    fib schedule, seed from what the ranking would actually buy, feed from the
+    live wheat price - so the only free parameter is how many days of it to
+    hold back, which tuning decides."""
+    hires, a, b = 0, 1, 1
+    for _ in range(HANDS_PER_DAY):
+        hires += a
+        a, b = b, a + b
+    seed = sum(SEED_COST[c] * SEED_BUFFER for c in ranked[:2])
+    feed = livestock * 3 * prices.get("WHEAT", 25)
+    return hires + seed + feed
+
 
 # Lower score wins. The first six were hardcoded priority levels 1-6 scaled by
 # the old PRIORITY_WEIGHT of 2; there was never a reason for them to be evenly
@@ -216,8 +257,15 @@ PARAMS = {
     # Pens are serviced every day, so where one is built fixes its running cost
     # for the rest of the season - the same argument as w_shed for planting.
     "w_pen_shed": 1.096,
+    # Days of running costs to keep in the bank before buying land. Starts at
+    # zero so the search has to turn it on, the same way every other feature
+    # had to earn its place.
+    "w_land_reserve": 0.0,
     # What a worker-action is worth. Charged against every tile use so a crop
     # (about 1 action/day) and an animal (about 2.5) compete on equal terms.
+    # Dollar value the last bonus watering must beat before it is taken ahead
+    # of the harvest. Zero means always take it.
+    "w_final_water": 0.0,
     "w_action_cost": 0.0,
 }
 
@@ -244,11 +292,33 @@ def _step_toward(fx, fy, tx, ty):
     return "NORTH"
 
 
+def _final_water_pays(crop, age, inventory, pending):
+    """Is the last bonus watering worth the tile-turnover it costs?
+
+    On the max-yield day a tile is both ripe and still able to gain a unit.
+    Watering first collects that unit but delays the harvest, and the delay
+    costs a slice of the tile's next cycle. Measured over 10 games: melon gains
+    19% of its units for no lost harvests, because a 10-day tile has no cycle
+    to slow - while carrot gains 48% per tile and loses 28% of its harvests,
+    which is close to a wash.
+
+    So the test is the unit's own worth, not the crop's name. The threshold is
+    a tuned dollar figure starting at zero, which reproduces "always water"
+    until the search decides otherwise."""
+    if age < MAX_YIELD_DAY[crop]:
+        return True  # mid-window watering displaces no harvest at all
+    return price_at(crop, inventory.get(crop, MARKET_I0) + pending.get(crop, 0))         > PARAMS["w_final_water"]
+
+
 def _candidates(obs, farm, private):
     """Every actionable tile as (param_key, action, x, y, yield_units)."""
     step, hour = obs["step"], obs["hour"]
     seeds = private["seeds"]
     can_plant = TURNS_PER_DAY - hour >= 2
+
+    inventory = obs["market"]["inventory"]
+    days_left = SEASON_DAYS - obs["day"]
+    pending = {c: pending_units(farm, private, c) for c in CROP_SPEC}
 
     found, plantable = [], []
     empty_pens = animals_placed = unfed = 0
@@ -290,23 +360,31 @@ def _candidates(obs, farm, private):
             water_earns = age <= MAX_YIELD_DAY[tile["crop"]]
             dying = tile["consecutive_unwatered"] >= 1 and not tile["watered_today"]
 
+            crop = tile["crop"]
+            earning = (crop in BONUS_START
+                       and BONUS_START[crop] <= age <= MAX_YIELD_DAY[crop])
+
             if dying and (water_earns or units == 0):
                 found.append(("w_water_urgent", [WATER], x, y, 0, None))
             elif units > 0 and decaying:
                 found.append(("w_harvest_decay", [HARVEST], x, y, units, None))
+            elif not tile["watered_today"] and earning and _final_water_pays(
+                    tile["crop"], age, inventory, pending):
+                # The last day of the bonus window is also the first day the
+                # tile counts as ripe, and harvesting used to win that tie - so
+                # every one-time crop was picked one watering short of the yield
+                # CROP_SPEC promises. Verified against the environment: wheat
+                # 3 -> 4, carrot 2 -> 3, melon 5 -> 6. Decay is still a full day
+                # away, so the harvest simply happens on a later turn.
+                found.append(("w_water_bonus", [WATER], x, y, 0, None))
             elif units > 0 and ripe:
                 found.append(("w_harvest_ripe", [HARVEST], x, y, units, None))
             elif not tile["watered_today"]:
-                earning = BONUS_START[tile["crop"]] <= age <= MAX_YIELD_DAY[tile["crop"]]
-                key = "w_water_bonus" if earning else "w_water_idle"
-                found.append((key, [WATER], x, y, 0, None))
+                found.append(("w_water_idle", [WATER], x, y, 0, None))
 
     # Planting more tiles in a turn than we hold seeds for makes every PLANT
     # that turn fail, not just the surplus ones - so each planned planting must
     # be backed by a seed we actually have.
-    inventory = obs["market"]["inventory"]
-    days_left = SEASON_DAYS - obs["day"]
-    pending = {c: pending_units(farm, private, c) for c in CROP_SPEC}
     budget = {c: seeds.get(c, 0) for c in CROP_SPEC}
 
     prices = obs["market"]["prices"]
@@ -487,11 +565,6 @@ def _market_orders(obs, farm, private):
             orders.append(["SELL", item, qty])
     orders += [["HIRE"]] * max(0, HANDS_PER_DAY - farm["hires_today"])
 
-    bought = len(farm["unlocked_quadrants"]) - 1
-    if bought < MAX_QUADRANTS - 1 and obs["day"] <= LAND_LAST_DAY:
-        if farm["money"] >= 1000 * 2**bought + LAND_RESERVE:
-            orders.append(["BUY_LAND"])
-
     prices = obs["market"]["prices"]
     days_left = SEASON_DAYS - obs["day"]
     pens = [t for row in farm["tiles"] for t in row
@@ -500,6 +573,21 @@ def _market_orders(obs, farm, private):
     livestock = len(pens) - empty_pens
 
     inventory = obs["market"]["inventory"]
+    ranked = sorted(
+        CROP_SPEC,
+        key=lambda c: crop_value(c, inventory, pending_units(farm, private, c), days_left),
+        reverse=True,
+    )
+
+    # Land is worth owning - removing it loses 36 of 40 games - but buying it
+    # before the farm can afford to work it starves the seed budget for a third
+    # of the season. Hold back a tuned number of days of running costs.
+    bought = len(farm["unlocked_quadrants"]) - 1
+    if bought < MAX_QUADRANTS - 1 and obs["day"] <= LAND_LAST_DAY:
+        reserve = PARAMS["w_land_reserve"] * daily_burn(
+            farm, private, prices, ranked, livestock)
+        if farm["money"] >= 1000 * 2**bought + reserve:
+            orders.append(["BUY_LAND"])
     _av = lambda a: animal_value(a, prices, days_left, inventory,
                                  livestock, private["shed"])
     best_animal = max(ANIMAL_SPEC, key=_av)
@@ -515,11 +603,6 @@ def _market_orders(obs, farm, private):
         if want > 0 and farm["money"] > prices.get("WHEAT", 25) * want * 2:
             orders.append(["BUY_PRODUCT", "WHEAT", want])
 
-    ranked = sorted(
-        CROP_SPEC,
-        key=lambda c: crop_value(c, inventory, pending_units(farm, private, c), days_left),
-        reverse=True,
-    )
     # Only buy seed for a crop still worth planting. crop_value goes negative
     # once a crop cannot mature before the season ends, and the planting loop
     # already refuses those - but the buying did not, so the agent kept
@@ -528,6 +611,12 @@ def _market_orders(obs, farm, private):
     for crop in ranked[:2]:
         if crop_value(crop, inventory, pending_units(farm, private, crop), days_left) <= 0:
             continue
+        # Restock all-or-nothing. Buying only what we can afford instead was
+        # measured and is worse - 26W-54L over 80 games on two independent seed
+        # ranges, about -$2,000 a game. The farm ends up permanently at zero
+        # cash: dripping every spare dollar into seed leaves nothing banked,
+        # and the crop mix it buys turns out identical either way. Holding out
+        # for a full restock is what lets money accumulate at all.
         shortfall = SEED_BUFFER - private["seeds"].get(crop, 0)
         if shortfall > 0 and farm["money"] > SEED_COST[crop] * shortfall * 2:
             orders.append(["BUY_SEED", crop, shortfall])

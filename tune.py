@@ -48,6 +48,11 @@ STEP = {
     "w_build": 1.5,
     "w_pickup": 1.5,
     "w_pen_shed": 0.5,
+    # Days of running costs held back before buying land. burn is ~$1,000, so
+    # a step of 0.5 moves the reserve by about half a day of spending.
+    "w_land_reserve": 0.5,
+    # A dollar threshold on a crop price, so it steps in dollars.
+    "w_final_water": 20.0,
 }
 
 
