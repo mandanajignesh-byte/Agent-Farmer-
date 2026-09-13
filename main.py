@@ -637,38 +637,111 @@ def _score(candidate, wx, wy, board_size):
     return score
 
 
+def _hungarian(cost):
+    """Exact minimum-cost assignment: match every row to a distinct column,
+    n rows by m columns, n <= m. O(n^2 * m) primal-dual method (Kuhn-Munkres
+    with potentials) - the standard algorithm for the assignment problem,
+    reimplemented in plain Python rather than imported from scipy, since a
+    submission is one self-contained file with no guaranteed third-party
+    packages in the judge's sandbox.
+
+    Returns a list of length n: the column assigned to row i."""
+    n, m = len(cost), len(cost[0])
+    INF = float("inf")
+    u = [0.0] * (n + 1)
+    v = [0.0] * (m + 1)
+    p = [0] * (m + 1)     # p[j] = the row (1-indexed) currently matched to j
+    way = [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [INF] * (m + 1)
+        used = [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta, j1 = INF, -1
+            for j in range(1, m + 1):
+                if used[j]:
+                    continue
+                cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta:
+                    delta, j1 = minv[j], j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+    result = [0] * (n + 1)
+    for j in range(1, m + 1):
+        if p[j]:
+            result[p[j]] = j
+    return [result[i] - 1 for i in range(1, n + 1)]
+
+
+# A pair's cost when the worker cannot actually do that job (does not carry
+# the required item). Large enough that the search never prefers it over any
+# real score, but finite - the env silently no-ops an infeasible FEED/PLACE
+# anyway, so the only cost of a forced pairing is one wasted turn, the same
+# as PASS would have cost.
+INFEASIBLE = 1e9
+
+
 def _assign_actions(obs, farm, private):
-    """One action per worker. Repeatedly takes the best (worker, tile) pair
-    available anywhere, rather than letting workers pick in a fixed order - the
-    farmer choosing first could otherwise take a tile a hand was standing on and
-    send that hand walking."""
+    """One action per worker, chosen to minimise the total score across every
+    worker at once - the assignment problem, solved exactly with the
+    Hungarian algorithm rather than the greedy pick-the-best-pair-repeatedly
+    heuristic this replaced. Greedy can strand a worker on a long walk when a
+    swap would have let two workers each take the tile nearer to them; exact
+    assignment cannot.
+
+    Idling is never given a competing score of its own - the weights in
+    PARAMS have no meaningful zero point (most are positive; doing some job
+    has always beaten doing none, at any score, as long as one is feasible)
+    - so a worker only ends up on PASS when there are genuinely fewer usable
+    candidates than workers, never because the search 'preferred' rest."""
     board_size = len(farm["tiles"])
     workers = [tuple(farm["farmer"])] + [tuple(h) for h in farm["hands"]]
     carrying = private.get("inventories") or [{}] * len(workers)
     pool = _candidates(obs, farm, private)
 
     actions = [[PASS] for _ in workers]
-    waiting = set(range(len(workers)))
+    n, j_count = len(workers), len(pool)
+    if j_count == 0:
+        return actions[0], actions[1:]
 
-    while waiting and pool:
-        best = None
-        for w in waiting:
-            wx, wy = workers[w]
-            held = carrying[w] if w < len(carrying) else {}
-            for c, candidate in enumerate(pool):
-                if candidate[5] and not held.get(candidate[5], 0):
-                    continue
-                score = _score(candidate, wx, wy, board_size)
-                if best is None or score < best[0]:
-                    best = (score, w, c)
-
-        if best is None:
-            break  # everything left needs an item nobody is carrying
-        _score_, w, c = best
+    # Extra idle columns only appear when there are more workers than
+    # candidates - a hard supply shortage, not a choice - so every real
+    # candidate still gets filled first; padding is never large enough to
+    # let a worker skip a real job it could have done.
+    m = max(j_count, n)
+    cost = [[0.0] * m for _ in range(n)]
+    for w in range(n):
         wx, wy = workers[w]
-        _key, action, tx, ty, _units, _needs = pool.pop(c)
-        waiting.discard(w)
+        held = carrying[w] if w < len(carrying) else {}
+        for c, candidate in enumerate(pool):
+            if candidate[5] and not held.get(candidate[5], 0):
+                cost[w][c] = INFEASIBLE
+            else:
+                cost[w][c] = _score(candidate, wx, wy, board_size)
 
+    assignment = _hungarian(cost)
+    for w, c in enumerate(assignment):
+        if c >= j_count or cost[w][c] >= INFEASIBLE:
+            continue  # a padding column, or no feasible job was left for it
+        wx, wy = workers[w]
+        _key, action, tx, ty, _units, _needs = pool[c]
         if (tx, ty) != (wx, wy):
             actions[w] = [_step_toward(wx, wy, tx, ty)]
         else:
