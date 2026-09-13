@@ -947,8 +947,18 @@ def _market_orders(obs, farm, private):
     want = empty_pens - waiting
     reserve = PARAMS["w_animal_reserve"] * daily_burn(
         farm, private, prices, ranked, livestock)
+    # BUY_ANIMAL is processed per unit by the env (verified against source:
+    # it buys until money runs out, then simply stops - never fails the
+    # whole order), the same as BUY_SEED already relies on elsewhere. This
+    # used to require affording all `want` units before submitting any -
+    # traced directly to a real, confirmed stall: 3 empty pens, animal_worth
+    # strongly positive (SHEEP worth ~$200-250/tile/day), $500-800 in the
+    # bank for five straight days, and zero animals bought, because the gate
+    # demanded $1,500 (3 x $500) before it would buy even one. Requiring
+    # only the first unit's cost lets the env's own per-unit fulfilment do
+    # the rest - it buys as many of `want` as it can actually afford.
     if (want > 0 and _av(best_animal) > 0
-            and farm["money"] > ANIMAL_SPEC[best_animal][0] * want + reserve):
+            and farm["money"] > ANIMAL_SPEC[best_animal][0] + reserve):
         orders.append(["BUY_ANIMAL", best_animal, want])
 
     # Feed is bought, never grown - a tile costs actions, which are scarcer than
