@@ -1,11 +1,14 @@
-"""Hill-climb main.PARAMS against a champion snapshot.
+"""Hill-climb main.PARAMS against the league, using fitness.py's own score.
 
     python tune.py [iterations] [seeds] [seed_offset]
 
-Fitness is the mean money margin against champion.py on a fixed seed set, not
-win rate: win rate over a dozen games is too coarse a signal to climb, while the
-margin is smooth. Win rate is the real metric, so validate the result with
-bench.py afterwards - and on seeds the search never saw.
+Used to fitness against one champion snapshot in dollars. That is the exact
+thing fitness.py was written to replace - one opponent is not the field, and
+dollars are not the metric the ladder counts - so the search now optimises
+the same bounded, soft-min, multi-opponent score fitness.py reports, against
+the same SEARCH_LEAGUE fitness.py already picked as the discriminating
+opponents. A search and its own scoreboard should never disagree about what
+"better" means.
 
 Two things keep the signal above the noise:
 
@@ -24,8 +27,9 @@ import random
 import statistics
 import sys
 
+import fitness
+
 FROZEN = {"w_dist"}
-CHAMPION = "champion.py"
 
 # How far a single mutation may move each weight.
 STEP = {
@@ -53,32 +57,59 @@ STEP = {
     "w_land_reserve": 0.5,
     # A dollar threshold on a crop price, so it steps in dollars.
     "w_final_water": 20.0,
+    # A count of pens, so a step near 1 is a meaningful move.
+    "w_pen_ahead": 1.0,
+    "w_animal_reserve": 0.5,
+    # Dimensionless (a load ratio scales it), so it can range widely - start
+    # with a coarse step and let sigma shrink it in CMA-ES.
+    "w_escape_risk": 1.0,
+    # 0..1 in principle (a share of the town's drain), but nothing stops the
+    # search finding a better fit outside that range, so it is not clamped.
+    "w_town_drift": 0.2,
 }
 
 
 def _play(job):
-    """One episode. Returns our money minus theirs."""
-    params, seed, swapped = job
+    """One episode against one league opponent. Returns tanh(margin/SCALE),
+    the same bounded per-game unit fitness.py scores with - or None if either
+    side crashed, so a crash can be told apart from a genuine narrow loss."""
+    params, opponent, seed, swapped = job
 
     import main
     from kaggle_environments import make
 
     main.PARAMS.update(params)
-    lineup = [CHAMPION, main.agent] if swapped else [main.agent, CHAMPION]
+    lineup = [opponent, main.agent] if swapped else [main.agent, opponent]
 
     env = make("kaggriculture", configuration={"episodeSteps": 720, "seed": seed})
     env.run(lineup)
     rewards = [s.reward for s in env.steps[-1]]
     if any(r is None for r in rewards):
-        return -1e6  # a crashed agent is never an improvement
+        return None  # a crashed agent is never an improvement
 
     mine, theirs = (rewards[1], rewards[0]) if swapped else (rewards[0], rewards[1])
-    return mine - theirs
+    import math
+    return math.tanh((mine - theirs) / fitness.SCALE)
 
 
-def evaluate(params, seeds, pool):
-    jobs = [(params, s, sw) for s in seeds for sw in (False, True)]
-    return statistics.mean(pool.map(_play, jobs))
+def evaluate(params, seeds, pool, league=None):
+    """fitness.py's own score() for one candidate - soft-min over the league,
+    each opponent's own mean tanh(margin/SCALE). Searching against exactly the
+    metric that will judge the result later is the whole point of wiring the
+    two files together; SEARCH_LEAGUE (the opponents still close enough to
+    move) is the default so the search does not spend its budget on games
+    that are already saturated at +1.000."""
+    league = league or fitness.SEARCH_LEAGUE
+    jobs = [(params, opponent, s, sw)
+            for opponent in league for s in seeds for sw in (False, True)]
+    results = pool.map(_play, jobs)
+
+    per_opponent = {o: [] for o in league}
+    for (_, opponent, _, _), value in zip(jobs, results):
+        if value is not None:
+            per_opponent[opponent].append(value)
+    means = [statistics.mean(v) for v in per_opponent.values() if v]
+    return fitness.soft_min(means)
 
 
 def mutate(params, rng):
@@ -93,7 +124,7 @@ def hill_climb(iterations, seeds, pool, rng):
 
     best = {k: v for k, v in main.PARAMS.items() if k not in FROZEN}
     best_score = evaluate(best, seeds, pool)
-    print(f"baseline margin ${best_score:+,.0f}", file=sys.stderr)
+    print(f"baseline score {best_score:+.4f}", file=sys.stderr)
 
     accepted = 0
     for i in range(1, iterations + 1):
@@ -103,8 +134,8 @@ def hill_climb(iterations, seeds, pool, rng):
         if better:
             best, best_score, accepted = candidate, score, accepted + 1
         print(
-            f"  {i:3d}/{iterations}  ${score:+9,.0f}"
-            f"  {'ACCEPT' if better else '      '}  best ${best_score:+,.0f}",
+            f"  {i:3d}/{iterations}  {score:+.4f}"
+            f"  {'ACCEPT' if better else '      '}  best {best_score:+.4f}",
             file=sys.stderr,
         )
 
@@ -121,7 +152,7 @@ if __name__ == "__main__":
     with mp.Pool(min(8, mp.cpu_count())) as pool:
         best, score = hill_climb(iterations, seeds, pool, random.Random(0))
 
-    print(f"\nbest margin ${score:+,.0f} on seeds {seeds}", file=sys.stderr)
+    print(f"\nbest score {score:+.4f} on seeds {seeds}", file=sys.stderr)
     print(json.dumps(best, indent=4), file=sys.stderr)
     with open("tuned_params.json", "w") as f:
         json.dump(best, f, indent=4)

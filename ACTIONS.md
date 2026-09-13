@@ -92,20 +92,51 @@ shifts to ongoing crops, this flips.
 
 ## Open defects
 
-1. **`LAND_RESERVE = 500` is a guess.** Land is bought on day 0, cash falls to
-   $204 by day 3 and stays under $500 until day 12. For those eleven days the
-   agent wants seed on *every single turn* and cannot pay. Land itself is worth
-   keeping — removing it loses 36 of 40 games — so this is a **timing** defect,
-   not a land defect.
+1. ~~`LAND_RESERVE = 500` is a guess.~~ **Fixed.** `daily_burn()` replaced the
+   flat $500 with hire cost (the real fib schedule) + seed cost (what the
+   ranking would actually buy) + feed cost (live wheat price), scaled by a
+   tunable `w_land_reserve` (starts at 0). Same pattern now used for
+   `w_animal_reserve` on animal purchases.
 
-2. **`animal_value` ignores `first_yield_day`.** A goose yields nothing for 4
-   days after placement, a sheep 6, a cow 8. The formula amortises the purchase
-   over `days_left` but assumes production starts immediately, so late-season
-   animals are overvalued by their entire lead time.
+2. ~~`animal_value` ignores `first_yield_day`.~~ **Fixed.** `produce` is scaled
+   by `(days_left - first_yield) / days_left`, so a late purchase that will
+   never see a payout is valued at zero produce (fertilizer, which starts on
+   placement day, is exempt).
 
-3. **Ongoing crops are scored for a watering bonus they cannot receive.**
-   Latent, not active.
+3. ~~Ongoing crops are scored for a watering bonus they cannot receive.~~
+   **Fixed.** `BONUS_START` excludes TOMATO and STRAWBERRY; only crops that
+   actually have a bonus window are checked for one.
 
-4. **Movement is 56% and PASS is 18%.** Together, three-quarters of every
-   action the farm takes produces nothing. This is the largest single pool of
-   waste in the agent.
+4. **Movement is ~56% and PASS is ~15%.** Together, most of every action the
+   farm takes produces nothing. This is a task-allocation / routing question,
+   not a value-function one — `w_dist`/`w_dist_sq` already price a trip's
+   length, but nothing yet prices a worker's opportunity cost against standing
+   still. Unstarted.
+
+5. **`MAX_QUADRANTS = 3` and `HANDS_PER_DAY = 8` are structural constants, not
+   `PARAMS` weights.** They were swept together in a controlled experiment
+   (four quadrants loses at every staffing level, because the fib hire cost
+   caps the workforce before that much land can be worked) rather than
+   guessed, but they are not searchable by `tune.py`/`tune_cma.py` the way
+   every dollar-weight is - both change the size of the action space itself
+   (board width, hire schedule length), which is a different kind of variable
+   than a score weight. Left as-is; revisit only if land/labour strategy
+   changes enough to warrant re-sweeping them.
+
+6. **One residual escape in 13 (test_behaviour.py) still starves an animal
+   with wheat in the shed.** Down from 89% of unfed-turns being unaddressed
+   before the carrier-count fix, and from a hard 4-workers-per-turn pickup
+   cap before this session's fix. What is left looks like routing latency - a
+   worker picks up wheat but cannot reach the pen before day-end - not a
+   capacity gap. Unconfirmed; not yet worth its own diagnostic.
+
+7. **Town drift (`w_town_drift`) and escape risk (`w_escape_risk`) are new,
+   both start at 0.** `animal_value` and `crop_value` now price wheat, milk,
+   wool, egg and carrot against the town's verified daily drain
+   (`town_drain_per_day`, exact in `test_model.py`) averaged over the
+   remaining horizon, and animal survival against a labour-capacity ratio -
+   but at their default weight of zero, both are pure structure with no
+   effect yet. Measured once against a strong opponent (v22): applying the
+   town drift at full trust (as if we were the only other seller) lost
+   $5,493/game, because the opponent's own selling cancels part of the drift.
+   That is exactly the kind of thing tuning, not a guess, should set.

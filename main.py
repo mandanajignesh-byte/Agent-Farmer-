@@ -71,6 +71,36 @@ def revenue_for(product, inventory, units):
     return total
 
 
+# Which shops want which product. Shops tick every 4 turns (6 times a day) and
+# a single-product shop consumes double; the town centre itself also takes 1
+# unit/day of everything except fertilizer. Verified exact against 28 days of
+# untouched inventory drift in test_model.py - not a guess.
+SHOPS = {
+    "BAKERY": ["EGG", "WHEAT"],
+    "PIZZA_SHOP": ["MILK", "TOMATO", "WHEAT"],
+    "BRUNCH_SPOT": ["EGG", "WHEAT", "STRAWBERRY"],
+    "YARN_STORE": ["WOOL"],
+    "ICE_CREAM_SHOP": ["STRAWBERRY", "MILK", "WHEAT"],
+    "PET_CAFE": ["CARROT"],
+    "SMOOTHIE_SHOP": ["STRAWBERRY", "MILK"],
+    "FARMERS_MARKET": ["WHEAT", "CARROT", "TOMATO", "STRAWBERRY"],
+}
+
+
+def town_drain_per_day(product, shops):
+    """Units/day the town removes from the market on its own, whether or not
+    we sell anything. This never reverses over a season, so a product's price
+    drifts in one direction the whole time it stays unlocked - milk, wool and
+    egg get scarcer (pricier) every day; fertilizer, drained by nobody but
+    other players, does not drift at all."""
+    rate = 0 if product == "FERTILIZER" else 1
+    for shop in shops:
+        demands = SHOPS[shop]
+        if product in demands:
+            rate += 6 * (2 if len(demands) == 1 else 1)
+    return rate
+
+
 TURNS_PER_DAY = 24
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
@@ -138,26 +168,37 @@ def pending_units(farm, private, crop):
     return units
 
 
-def crop_value(crop, inventory, pending, days_left=None):
+def crop_value(crop, inventory, pending, days_left=None, shops=None):
     """Profit per tile per day for ONE MORE tile of this crop, pricing its yield
     unit by unit as it pushes the price down.
 
     This is what makes tile counts self-balancing: plant more melon and melon's
     marginal value falls until carrot overtakes it, then wheat overtakes carrot.
     No target count has to be chosen, and the mix re-balances on its own if an
-    opponent floods a market."""
+    opponent floods a market.
+
+    Wheat and carrot are two of the town's most heavily-drained products (four
+    shops want wheat, one wants carrot) - the same drift animal_value prices
+    for milk, wool and egg applies here too, at the same tunable trust level
+    (w_town_drift, starts at 0). Melon and tomato are not in any shop's list
+    and drift by exactly zero either way."""
     yield_units, seed_cost, days = CROP_SPEC[crop]
     if days_left is not None and days_left < days:
         # Cannot mature before the season ends, and we only harvest at
         # age >= MAX_YIELD_DAY, so it would never be picked even partially.
         # The seed is simply spent.
         return -seed_cost
-    revenue = revenue_for(crop, inventory.get(crop, MARKET_I0) + pending, yield_units)
+    horizon = max(days_left or 0, 0) / 2
+    drain = town_drain_per_day(crop, shops or [])
+    effective_inventory = (inventory.get(crop, MARKET_I0) + pending
+                            - PARAMS["w_town_drift"] * drain * horizon)
+    revenue = revenue_for(crop, effective_inventory, yield_units)
     actions = 1 + 1 / days  # a watering a day, plus the harvest at the end
     return (revenue - seed_cost) / days - PARAMS["w_action_cost"] * actions
 
 
-def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
+def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None,
+                  shops=None):
     """Profit per tile per day, with the purchase amortised over the season that
     is left. Late in the game that term explodes and the value goes negative, so
     the agent stops buying without needing a cutoff date - it stops exactly at
@@ -166,10 +207,45 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
     Income is priced marginally, the same way crop_value does it: a herd of a
     dozen animals produces hundreds of units over a season and drives its own
     prices down. Fertilizer especially - no town shop consumes it, so the only
-    thing draining that market is other players buying."""
+    thing draining that market is other players buying.
+
+    Two more forces move these prices on their own, independent of anything we
+    do, and both are folded in below rather than left for tuning to guess at:
+
+    - The town's shops eat product every day, and that drain never reverses
+      (town_drain_per_day is verified exact in test_model.py). A product's
+      price drifts up for the rest of the season purely from that, so it is
+      priced here as an average over the animal's remaining life rather than
+      a single snapshot - milk, wool and egg are worth more to be holding the
+      longer the season has left to run. Wheat drains the same way (five of
+      eight shops want it), so feed cost is projected forward too.
+    - Feeding needs a worker free to carry wheat and stand at the pen every
+      day. A herd bigger than the workforce can service starts missing
+      feedings, and two consecutive misses loses the animal for good (rule
+      verified in test_model.py). That risk is invisible in today's price, so
+      it is modelled from the ratio of daily pen chores to hands available -
+      below capacity it costs nothing; above it, w_escape_risk (starts at 0,
+      so nothing changes until tuning turns it on) decides how much it bites.
+    """
     cost, product, interval, max_held, first_yield = ANIMAL_SPEC[animal]
     inventory = inventory or {}
     shed = shed or {}
+    shops = shops or []
+
+    # Town drain is linear and never reverses, so its mean over the horizon we
+    # are pricing for is just the midpoint. Applied as a further shortfall on
+    # top of whatever we and the existing herd already add to the inventory.
+    horizon = max(days_left, 0) / 2
+
+    def drifted(item, extra_pending=0):
+        drain = town_drain_per_day(item, shops)
+        # The town is not the only other seller: an opponent adding supply to
+        # the same market cancels this drift, and how much it cancels is not
+        # something the rules state - only measurement can say. w_town_drift
+        # (starts at 0) is how much of the town's uncontested drain we trust
+        # will still be there once a real opponent is selling too.
+        return (inventory.get(item, MARKET_I0) + extra_pending
+                - PARAMS["w_town_drift"] * drain * horizon)
 
     # what our existing herd will still add before this animal's output lands
     made_per_animal = max(days_left, 0)
@@ -181,15 +257,14 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
     # interval instead of 1 - triple for a cow, four times for a sheep. Capped
     # by max_held, which the bank cannot exceed.
     per_event = min(1 + interval, max_held)
-    units = revenue_for(product, inventory.get(product, MARKET_I0) + prod_pending, per_event)
+    units = revenue_for(product, drifted(product, prod_pending), per_event)
     produce = units / interval
     # Every surviving animal yields one fertilizer a day, free, fed or not -
     # and fertilizer's base price of $100 makes that stream comparable to the
     # milk. Valuing an animal on its product alone undercounts it by about
     # half, which is why the herd never grew.
-    fertilizer = revenue_for(
-        "FERTILIZER", inventory.get("FERTILIZER", MARKET_I0) + fert_pending, 1)
-    feed = prices.get("WHEAT", 25)  # bought, not grown - tiles cost actions
+    fertilizer = revenue_for("FERTILIZER", drifted("FERTILIZER", fert_pending), 1)
+    feed = price_at("WHEAT", drifted("WHEAT"))  # bought, not grown - tiles cost actions
     actions = 3 + 1 / interval  # feed, care and collect daily; harvest each interval
 
     # An animal produces nothing for its first `first_yield` days - 4 for a
@@ -200,6 +275,16 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None):
     # animal drops one a day from the start whether it is producing or not.
     productive = max(0, days_left - first_yield)
     produce *= productive / max(days_left, 1)
+
+    # service_load is the daily pen chores the herd this animal would join
+    # needs, divided by the hands the farm targets hiring - both read from the
+    # game, nothing assumed. At or under 1 there are enough hands and the risk
+    # is zero by construction; over 1, w_escape_risk sets how fast the
+    # survival odds fall off.
+    service_load = (herd + 1) * actions / HANDS_PER_DAY
+    survival = 1 / (1 + PARAMS["w_escape_risk"] * max(0.0, service_load - 1))
+    produce *= survival
+    fertilizer *= survival
 
     return (produce + fertilizer - feed - cost / max(days_left, 1)
             - PARAMS["w_action_cost"] * actions)
@@ -230,15 +315,20 @@ def daily_burn(farm, private, prices, ranked, livestock):
 # the old PRIORITY_WEIGHT of 2; there was never a reason for them to be evenly
 # spaced integers, so they are now searchable.
 PARAMS = {
-    "w_water_urgent": 5.907,
-    "w_harvest_decay": 2.157,
-    "w_harvest_ripe": 4.517,
+    # Hill-climbed against fitness.py's league soft-min score (SEARCH_LEAGUE),
+    # then validated on 12 seeds the search never saw against the FULL league:
+    # +0.82 overall, +0.90 mean, 79.2% win rate against v22 (our toughest
+    # opponent, up from 75% before this round), 0 crashes over 120 games. See
+    # tune_hillclimb.log / validate_tuned.log.
+    "w_water_urgent": 8.418,
+    "w_harvest_decay": 4.797,
+    "w_harvest_ripe": 5.17,
     # Watering inside the bonus window earns a unit of yield; outside it, on a
     # plant in no danger, it earns nothing and only costs the walk.
-    "w_water_bonus": 7.903,
+    "w_water_bonus": 7.529,
     "w_water_idle": 30.0,
     "w_plant": 10.623,
-    "w_dig": 10.988,
+    "w_dig": 12.865,
     "w_dist": 1.0,
     "w_dist_sq": 0.0,
     # PLANT only. Where an existing plant sits is already fixed, but choosing
@@ -250,10 +340,10 @@ PARAMS = {
     "w_harvest_animal": 3.5,
     "w_collect": 3.5,
     "w_care": 3.0,
-    "w_drop": 4.0,
-    "w_place": -0.02,
-    "w_build": 8.0,
-    "w_pickup": 8.238,
+    "w_drop": 4.943,
+    "w_place": -1.419,
+    "w_build": 8.313,
+    "w_pickup": 9.138,
     # Pens are serviced every day, so where one is built fixes its running cost
     # for the rest of the season - the same argument as w_shed for planting.
     "w_pen_shed": 1.096,
@@ -266,7 +356,26 @@ PARAMS = {
     # Dollar value the last bonus watering must beat before it is taken ahead
     # of the harvest. Zero means always take it.
     "w_final_water": 0.0,
-    "w_action_cost": 0.0,
+    "w_action_cost": 5.424,
+    # How many empty pens to keep standing ahead of the animals waiting to
+    # fill them. Building is free, so this only trades a tile against the
+    # crop it could have grown instead - which the animal-vs-crop comparison
+    # already prices per tile. Starts at the old hardcoded 2.
+    "w_pen_ahead": 2.861,
+    # Days of running costs to keep in the bank before buying an animal - the
+    # same argument as w_land_reserve, on the same daily_burn. Starts at zero.
+    "w_animal_reserve": -0.455,
+    # How sharply feeding risk should bite once the herd needs more daily pen
+    # chores than the farm's target headcount can supply. Zero means the herd
+    # is assumed perfectly fed no matter how large it gets - the search turned
+    # this on, so it now does bite.
+    "w_escape_risk": 0.449,
+    # How much of the town's daily drain we still trust once a real opponent
+    # is adding supply to the same market and cancelling part of it. The
+    # search landed almost exactly halfway between "ignore the town" (0) and
+    # "we are the only other seller" (1) - which is what partial cancellation
+    # from an actively-selling opponent should look like.
+    "w_town_drift": 0.488,
 }
 
 
@@ -388,16 +497,17 @@ def _candidates(obs, farm, private):
     budget = {c: seeds.get(c, 0) for c in CROP_SPEC}
 
     prices = obs["market"]["prices"]
+    shops = obs["town"]["unlocked_shops"]
     _av = lambda a: animal_value(a, prices, days_left, inventory,
-                                 animals_placed, private["shed"])
+                                 animals_placed, private["shed"], shops)
     best_animal = max(ANIMAL_SPEC, key=_av)
     animal_worth = _av(best_animal)
 
-    # A pen only pays once an animal stands in it, so build them a couple ahead
-    # of demand rather than covering the farm in empty structures.
+    # A pen only pays once an animal stands in it, so build them a tuned number
+    # ahead of demand rather than covering the farm in empty structures.
     for x, y in plantable:
-        if animal_worth > 0 and empty_pens < 2:
-            crop_best = max((crop_value(c, inventory, pending[c], days_left)
+        if animal_worth > 0 and empty_pens < PARAMS["w_pen_ahead"]:
+            crop_best = max((crop_value(c, inventory, pending[c], days_left, shops)
                              for c in CROP_SPEC), default=0)
             if animal_worth > crop_best:
                 empty_pens += 1
@@ -407,12 +517,13 @@ def _candidates(obs, farm, private):
         affordable = [c for c in CROP_SPEC if budget[c] > 0]
         best = max(
             affordable,
-            key=lambda c: crop_value(c, inventory, pending[c], days_left),
+            key=lambda c: crop_value(c, inventory, pending[c], days_left, shops),
             default=None,
         )
         # Nothing left that can mature in time - stop planting entirely and
         # leave the workers free to harvest and sell.
-        if best is None or crop_value(best, inventory, pending[best], days_left) <= 0:
+        if (best is None
+                or crop_value(best, inventory, pending[best], days_left, shops) <= 0):
             break
         budget[best] -= 1
         # this tile's own output crowds the next one
@@ -430,21 +541,42 @@ def _candidates(obs, farm, private):
     # sell it. Anything still being carried then scores nothing, so on the last
     # day it is worth walking it in. One candidate per item type actually held,
     # so only a worker carrying that item takes the job.
-    if obs["day"] >= SEASON_DAYS - 1:
+    # v21 offered a single DROP, at one shed tile, on the last day only. That is
+    # one job for nine workers, so most of them still finished the season
+    # holding produce: 28 units worth about $3,000 were measured still in hand
+    # on turn 718. Offer a trip per shed-access tile, and start a day earlier so
+    # what gets dropped still has turns left to be sold in.
+    if obs["day"] >= SEASON_DAYS - 2:
         held = set()
         for inv in (private.get("inventories") or []):
             held.update(k for k, v in inv.items() if v > 0 and k in MARKET_PARAMS)
         for item in held:
-            sx, sy = _shed_tiles(board)[0]
-            found.append(("w_drop", [DROP], sx, sy, 0, item))
-    carried = sum(inv.get("WHEAT", 0) for inv in (private.get("inventories") or []))
-    # One fetch per turn meant a single worker carried the whole herd's feed and
-    # walked it round every pen. As the herd grew, animals starved waiting -
-    # six escaped in a season at seven animals, $400 each plus their output.
-    # Offer a trip per shed-access tile so several workers can share the round.
-    hungry = unfed - carried
+            for sx, sy in _shed_tiles(board):
+                found.append(("w_drop", [DROP], sx, sy, 0, item))
+    # Count the workers who can feed, not the wheat they are holding. A FEED job
+    # requires wheat in hand, so what limits feeding is how many workers carry
+    # any - not the total units. v22 made the pickups parallel but left this
+    # test counting units, and the farm settled at about two carriers holding
+    # nine wheat between them against four hungry animals: unfed - units came
+    # out negative, so no further pickup was ever offered, and the other seven
+    # workers could not help. That switched the trigger off on 89% of the turns
+    # where an animal was actually unfed, and animals still starved in sight of
+    # a full shed.
+    carriers = sum(1 for inv in (private.get("inventories") or [])
+                   if inv.get("WHEAT", 0) > 0)
+    hungry = unfed - carriers
     if hungry > 0 and shed.get("WHEAT", 0) > 0:
-        for sx, sy in _shed_tiles(board)[:min(4, hungry)]:
+        # There are only 4 physical shed tiles, but nothing stops two workers
+        # detouring through the same one - the assignment loop claims each
+        # candidate independently. Capping at 4 candidates capped feeding
+        # trips at 4 a turn too, which was enough for a 6-animal herd and not
+        # for the herds this agent is now meant to grow: with more than 4
+        # animals hungry at once, the rest went unfed with wheat sitting in
+        # the shed, occasionally two days running. One candidate per hungry
+        # animal, tiles reused, lets every worker who is needed go.
+        tiles = _shed_tiles(board)
+        for i in range(hungry):
+            sx, sy = tiles[i % len(tiles)]
             found.append(("w_pickup", ["PICKUP", "WHEAT", max(hungry, 1)], sx, sy, 0, None))
     for animal in ANIMAL_SPEC:
         if shed.get(animal, 0) > 0 and empty_pens:
@@ -573,9 +705,11 @@ def _market_orders(obs, farm, private):
     livestock = len(pens) - empty_pens
 
     inventory = obs["market"]["inventory"]
+    shops = obs["town"]["unlocked_shops"]
     ranked = sorted(
         CROP_SPEC,
-        key=lambda c: crop_value(c, inventory, pending_units(farm, private, c), days_left),
+        key=lambda c: crop_value(c, inventory, pending_units(farm, private, c),
+                                 days_left, shops),
         reverse=True,
     )
 
@@ -589,18 +723,29 @@ def _market_orders(obs, farm, private):
         if farm["money"] >= 1000 * 2**bought + reserve:
             orders.append(["BUY_LAND"])
     _av = lambda a: animal_value(a, prices, days_left, inventory,
-                                 livestock, private["shed"])
+                                 livestock, private["shed"], shops)
     best_animal = max(ANIMAL_SPEC, key=_av)
     waiting = sum(private["shed"].get(a, 0) for a in ANIMAL_SPEC)
-    if (_av(best_animal) > 0 and empty_pens > waiting
-            and farm["money"] > ANIMAL_SPEC[best_animal][0] + 500):
-        orders.append(["BUY_ANIMAL", best_animal, 1])
+    # Buy for every pen that is standing empty and not already spoken for,
+    # not just one at a time - a herd that only grows by one animal a day
+    # cannot keep pace with pens that are free to build several at once.
+    want = empty_pens - waiting
+    reserve = PARAMS["w_animal_reserve"] * daily_burn(
+        farm, private, prices, ranked, livestock)
+    if (want > 0 and _av(best_animal) > 0
+            and farm["money"] > ANIMAL_SPEC[best_animal][0] * want + reserve):
+        orders.append(["BUY_ANIMAL", best_animal, want])
 
     # Feed is bought, never grown - a tile costs actions, which are scarcer than
     # money. Keep a few days of buffer so a price spike never starves the herd.
+    # Wheat is the most shop-drained product in the game, so the buffer is
+    # priced against where the drift (w_town_drift) expects it to be, not
+    # today's quote.
     if livestock:
         want = livestock * 3 - private["shed"].get("WHEAT", 0)
-        if want > 0 and farm["money"] > prices.get("WHEAT", 25) * want * 2:
+        wheat_drift = PARAMS["w_town_drift"] * town_drain_per_day("WHEAT", shops) * (days_left / 2)
+        feed_price = price_at("WHEAT", inventory.get("WHEAT", MARKET_I0) - wheat_drift)
+        if want > 0 and farm["money"] > feed_price * want * 2:
             orders.append(["BUY_PRODUCT", "WHEAT", want])
 
     # Only buy seed for a crop still worth planting. crop_value goes negative
@@ -609,7 +754,8 @@ def _market_orders(obs, farm, private):
     # stocking seed it could never use. Roughly $1,000 of dead stock by turn
     # 720, when unsold inventory scores nothing.
     for crop in ranked[:2]:
-        if crop_value(crop, inventory, pending_units(farm, private, crop), days_left) <= 0:
+        if crop_value(crop, inventory, pending_units(farm, private, crop),
+                      days_left, shops) <= 0:
             continue
         # Restock all-or-nothing. Buying only what we can afford instead was
         # measured and is worse - 26W-54L over 80 games on two independent seed

@@ -15,24 +15,18 @@ exactly the move hill climbing cannot make.
 Weights are normalised by their step scale before being handed to CMA, since the
 raw values span 0.05 to 30 and a single sigma cannot serve both ends.
 
-Fitness is the money margin against champion.py on a fixed seed set, for the
-same reasons as tune.py: win rate over a dozen games is too coarse to optimise,
-and identical seeds cancel most of the per-episode noise out of the comparison.
-Validate the result with bench.py on seeds the search never saw.
+Fitness is fitness.py's own league soft-min score, the same objective tune.py
+climbs and the same one the ladder is judged on - not dollars against one
+champion. evaluate() is imported from tune.py rather than redefined, so the
+two searches and the scoreboard can never quietly drift apart.
 """
 import json
 import multiprocessing as mp
-import statistics
 import sys
 
 import cma
 
-from tune import CHAMPION, FROZEN, STEP, _play
-
-
-def evaluate(params, seeds, pool):
-    jobs = [(params, s, sw) for s in seeds for sw in (False, True)]
-    return statistics.mean(pool.map(_play, jobs))
+from tune import FROZEN, STEP, evaluate
 
 
 def main(generations, n_seeds, offset):
@@ -52,7 +46,7 @@ def main(generations, n_seeds, offset):
     with mp.Pool(min(8, mp.cpu_count())) as pool:
         base = evaluate(best, seeds, pool)
         best_score = base
-        print(f"baseline margin ${base:+,.0f}  over {len(names)} weights", file=sys.stderr)
+        print(f"baseline score {base:+.4f}  over {len(names)} weights", file=sys.stderr)
 
         for gen in range(1, generations + 1):
             population = es.ask()
@@ -64,12 +58,12 @@ def main(generations, n_seeds, offset):
                 best_score = top
                 best = to_params(population[scores.index(top)])
             print(
-                f"  gen {gen:3d}/{generations}  best this gen ${top:+9,.0f}"
-                f"   overall ${best_score:+9,.0f}   sigma {es.sigma:.3f}",
+                f"  gen {gen:3d}/{generations}  best this gen {top:+.4f}"
+                f"   overall {best_score:+.4f}   sigma {es.sigma:.3f}",
                 file=sys.stderr,
             )
 
-    print(f"\nbest margin ${best_score:+,.0f} on seeds {seeds}", file=sys.stderr)
+    print(f"\nbest score {best_score:+.4f} on seeds {seeds}", file=sys.stderr)
     print(json.dumps(best, indent=4), file=sys.stderr)
     with open("tuned_params.json", "w") as f:
         json.dump(best, f, indent=4)
