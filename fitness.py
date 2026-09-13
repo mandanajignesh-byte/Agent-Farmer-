@@ -55,16 +55,25 @@ LEAGUE = [
     "league/v16.py",   # marginal crop mix, leaderboard 486.1
     "league/v18.py",   # audit fixes, leaderboard 445.8
     "league/v22.py",   # CARE + parallel feeding, leaderboard 533.5
+    # Real public solutions, pulled from Kaggle (see the provenance comment
+    # at the top of each file), not our own lineage. Both beat every agent
+    # above by 2-3x when this pair was added, which is exactly the blind
+    # spot fitness.py's own docstring warns about: every gain we had
+    # measured up to that point was a gain against ourselves.
+    "league_public/public_2900.py",  # scripted 8C/4S cow/sheep core
+    "league_public/master_v3.py",    # multi-contributor heuristic engine
 ]
 
 # A saturated opponent carries no gradient. The current agent scores +1.000
-# against v10 and v14 - tanh is pinned, so no change it could make would move
-# that number, and those games are pure cost during a search. v16 is nearly
-# saturated at +0.999. Searching therefore uses only the opponents still close
-# enough to discriminate; the full LEAGUE is for validation, where beating a
-# weak opponent 100% of the time is still worth confirming rather than
-# assuming.
-SEARCH_LEAGUE = ["league/v18.py", "league/v22.py"]
+# against v10 and v14, +0.999 against v16, and now +0.998 against v18 too
+# (Hungarian assignment + the town/animal fixes pushed it over the line) -
+# tanh is pinned, so no change it could make would move those numbers, and
+# those games are pure cost during a search. v22 (+0.869) still carries real
+# gradient, and the two public opponents currently beat us outright, which is
+# the strongest gradient available. Searching therefore uses only these
+# three; the full LEAGUE is for validation, where beating a weak opponent
+# 100% of the time is still worth confirming rather than assuming.
+SEARCH_LEAGUE = ["league/v22.py", "league_public/public_2900.py", "league_public/master_v3.py"]
 
 SATURATION = 0.99
 
