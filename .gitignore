@@ -6,3 +6,4 @@ tuned_params.json
 champion.py
 replays/
 *.log
+replays_hungarian/

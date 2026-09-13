@@ -47,6 +47,7 @@ STEP = {
     "w_harvest_animal": 1.0,
     "w_collect": 1.0,
     "w_care": 1.0,
+    "w_fertilize": 1.0,
     "w_drop": 1.0,
     "w_place": 1.0,
     "w_build": 1.5,
@@ -69,9 +70,30 @@ STEP = {
 }
 
 
+# Raw dollars don't saturate, but they aren't comparable across opponents of
+# very different strength either - and that turned out to matter just as
+# much. A first attempt used plain raw margin, and the search happily let
+# v22's margin fall from +$19,306 to -$12,090 (a real, measured regression)
+# to chase a barely-distinguishable-from-noise change against opponents
+# still $90k+ away. Soft-min over raw dollars doesn't average, it fixates on
+# whichever number is most extreme - and an extreme number is not the same
+# thing as the number most worth improving.
+#
+# The actual fix is a bounded unit again, just not the same bound for every
+# opponent: each opponent gets a tanh scale sized to its own typical stakes,
+# so "narrow this loss" is comparable in [-1, 1] whether the opponent is
+# barely beatable or far ahead, and the search can no longer treat a $30,000
+# swing on a beatable opponent as too small to matter next to a $5,000 swing
+# against an unbeatable one.
+SCALE_OVERRIDE = {
+    "league_public/public_2900.py": 100_000,
+    "league_public/master_v3.py": 100_000,
+}
+
+
 def _play(job):
-    """One episode against one league opponent. Returns tanh(margin/SCALE),
-    the same bounded per-game unit fitness.py scores with - or None if either
+    """One episode against one league opponent. Returns tanh(margin/scale)
+    using that opponent's own scale (see SCALE_OVERRIDE), or None if either
     side crashed, so a crash can be told apart from a genuine narrow loss."""
     params, opponent, seed, swapped = job
 
@@ -89,16 +111,15 @@ def _play(job):
 
     mine, theirs = (rewards[1], rewards[0]) if swapped else (rewards[0], rewards[1])
     import math
-    return math.tanh((mine - theirs) / fitness.SCALE)
+    scale = SCALE_OVERRIDE.get(opponent, fitness.SCALE)
+    return math.tanh((mine - theirs) / scale)
 
 
 def evaluate(params, seeds, pool, league=None):
-    """fitness.py's own score() for one candidate - soft-min over the league,
-    each opponent's own mean tanh(margin/SCALE). Searching against exactly the
-    metric that will judge the result later is the whole point of wiring the
-    two files together; SEARCH_LEAGUE (the opponents still close enough to
-    move) is the default so the search does not spend its budget on games
-    that are already saturated at +1.000."""
+    """Soft-min over the league of each opponent's own mean bounded score
+    (see _play / SCALE_OVERRIDE for why every opponent gets its own scale).
+    This is fitness.py's own metric again for any opponent at the default
+    scale, and the same idea - just calibrated - for the two that are not."""
     league = league or fitness.SEARCH_LEAGUE
     jobs = [(params, opponent, s, sw)
             for opponent in league for s in seeds for sw in (False, True)]

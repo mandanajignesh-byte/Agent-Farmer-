@@ -131,6 +131,7 @@ MAX_QUADRANTS = 3
 LAND_LAST_DAY = 20
 
 WATER, HARVEST, PLANT, DIG, PASS = "WATER", "HARVEST", "PLANT", "DIG", "PASS"
+FERTILIZE = "FERTILIZE"
 COLLECT = "COLLECT_FERTILIZER"
 DROP = "DROP"
 WEED = "WEED"
@@ -168,7 +169,7 @@ def pending_units(farm, private, crop):
     return units
 
 
-def crop_value(crop, inventory, pending, days_left=None, shops=None):
+def crop_value(crop, inventory, pending, days_left=None, shops=None, fert_pending=0):
     """Profit per tile per day for ONE MORE tile of this crop, pricing its yield
     unit by unit as it pushes the price down.
 
@@ -181,7 +182,15 @@ def crop_value(crop, inventory, pending, days_left=None, shops=None):
     shops want wheat, one wants carrot) - the same drift animal_value prices
     for milk, wool and egg applies here too, at the same tunable trust level
     (w_town_drift, starts at 0). Melon and tomato are not in any shop's list
-    and drift by exactly zero either way."""
+    and drift by exactly zero either way.
+
+    Whether fertilizing this crop is worth it is decided once here and reused
+    - not recomputed independently by _candidates - so a tile that fertilizing
+    would help is valued at its real, higher worth (the extra headroom units,
+    priced the same marginal way) at the cost of the extra action fertilizing
+    takes, rather than being ranked as if that action and that yield did not
+    exist. Melon, tomato and strawberry have zero headroom, so this changes
+    nothing for them regardless of price."""
     yield_units, seed_cost, days = CROP_SPEC[crop]
     if days_left is not None and days_left < days:
         # Cannot mature before the season ends, and we only harvest at
@@ -194,7 +203,46 @@ def crop_value(crop, inventory, pending, days_left=None, shops=None):
                             - PARAMS["w_town_drift"] * drain * horizon)
     revenue = revenue_for(crop, effective_inventory, yield_units)
     actions = 1 + 1 / days  # a watering a day, plus the harvest at the end
+    if fertilize_value(crop, inventory, pending, fert_pending) > 0:
+        headroom = TRUE_MAX_YIELD[crop] - yield_units
+        revenue += revenue_for(crop, effective_inventory + yield_units, headroom)
+        actions += 1 / days  # the fertilize action, amortised like the harvest
     return (revenue - seed_cost) / days - PARAMS["w_action_cost"] * actions
+
+
+# The environment's own per-crop yield cap (CROPS[c]["max_yield"], verified
+# against the env source, not a guess) - higher than what CROP_SPEC's own
+# "achievable" figure reaches without fertilizer for wheat and carrot.
+# Melon, tomato and strawberry already reach this cap unfertilized, so
+# fertilize_value naturally prices them at zero headroom without needing to
+# special-case them.
+TRUE_MAX_YIELD = {"WHEAT": 6, "CARROT": 4, "TOMATO": 4, "STRAWBERRY": 4, "MELON": 6}
+
+
+def fertilize_value(crop, inventory, pending, fert_pending):
+    """Profit from spending one fertilizer on this crop instead of selling
+    it, priced the same dynamic way as everything else - not the static
+    "$50 vs $100, selling wins" comparison this used to be judged by.
+
+    That comparison was true at a single snapshot price, but fertilizer has
+    no town-shop demand at all (verified in test_model.py) - the only thing
+    that ever drains its market is us or an opponent selling less of it. A
+    farm running a serious herd produces far more fertilizer than a crop
+    plot can absorb by fertilizing, and every unit sold pushes fertilizer's
+    own price down while a well-protected crop like wheat barely sags on
+    glut - so at high volume the marginal fertilizer sale can easily be
+    worth less than the marginal wheat gain, which is exactly backwards from
+    the snapshot comparison. headroom is the extra yield fertilizer can
+    still add before the crop's own true cap, verified against the
+    environment; it is already zero for melon, tomato and strawberry, which
+    reach that cap without any fertilizer at all."""
+    yield_units, _, _ = CROP_SPEC[crop]
+    headroom = TRUE_MAX_YIELD[crop] - yield_units
+    if headroom <= 0:
+        return -1
+    extra_revenue = revenue_for(crop, inventory.get(crop, MARKET_I0) + pending, headroom)
+    fert_given_up = price_at("FERTILIZER", inventory.get("FERTILIZER", MARKET_I0) + fert_pending)
+    return extra_revenue - fert_given_up - PARAMS["w_action_cost"]
 
 
 def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None,
@@ -301,14 +349,51 @@ def daily_burn(farm, private, prices, ranked, livestock):
     Every term is read from the game rather than assumed - hire cost from the
     fib schedule, seed from what the ranking would actually buy, feed from the
     live wheat price - so the only free parameter is how many days of it to
-    hold back, which tuning decides."""
+    hold back, which tuning decides.
+
+    Missing until now: the cost of the next animal. A land purchase competes
+    for the exact same cash as growing the herd, and real opponents spend
+    theirs on animals and hands instead of a second quadrant - verified
+    against 19 real games (day-0 money $3,000 -> day-1 $246, seed-starved
+    while the opponent, on identical land, had already planted 3x as many
+    tiles). w_land_reserve has sat at 0 through every tuning round because
+    daily_burn never gave it a reason to move - it priced feeding the herd
+    that exists, never growing it. The cheapest animal's cost is the
+    smallest real stake in that competition, not an assumption about which
+    animal or how many."""
     hires, a, b = 0, 1, 1
     for _ in range(HANDS_PER_DAY):
         hires += a
         a, b = b, a + b
     seed = sum(SEED_COST[c] * SEED_BUFFER for c in ranked[:2])
     feed = livestock * 3 * prices.get("WHEAT", 25)
-    return hires + seed + feed
+    animal = min(cost for cost, *_ in ANIMAL_SPEC.values())
+    return hires + seed + feed + animal
+
+
+def _fib_hire_cost(n):
+    """Cost of the (n+1)-th hire today - the env's own fib(n) schedule,
+    1, 1, 2, 3, 5, 8, ... Exponential within a day, and resets to 1 again
+    tomorrow, because hands vanish overnight - a hired hand is a same-day
+    rental, not a season asset the way land or an animal is."""
+    a, b = 1, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+
+def hire_value(n, best_task_value, turns_left):
+    """UNUSED - kept as a documented false start, not wired into
+    _market_orders. See the comment there for what was measured and why
+    this formula's shape is wrong: it scaled best_task_value (a $/tile/day
+    rate) by a fraction of today's remaining turns, which prices an extra
+    hand as capable of only a fraction of one tile's work, when it can
+    actually complete several separate full-value actions in that time.
+    Reusable once that's fixed - the cost side (the fib schedule) is real
+    and unaffected."""
+    cost = _fib_hire_cost(n)
+    value = best_task_value * (turns_left / TURNS_PER_DAY)
+    return value - cost
 
 
 # Lower score wins. The first six were hardcoded priority levels 1-6 scaled by
@@ -333,12 +418,30 @@ PARAMS = {
     "w_dist_sq": 0.0,
     # PLANT only. Where an existing plant sits is already fixed, but choosing
     # where to plant fixes every future trip to that tile.
+    #
+    # The sign looks backwards next to w_pen_shed (same _shed_distance
+    # formula, opposite sign) - tested flipping it directly: measured mean
+    # plant-to-shed distance over 3 seeds barely moved (5.28 vs 5.07/4.94),
+    # confirming why. Every empty tile eventually gets a PLANT candidate
+    # regardless of distance (nothing filters candidate generation by shed
+    # proximity, only the assignment score once a tile is already a
+    # candidate), so this term only nudges transient turn-to-turn ordering,
+    # not which tiles end up planted - not the mechanism behind the real gap
+    # found the same day (see below), which is planting throughput, not
+    # placement. Left as-is; revisit only with real supporting evidence,
+    # not the sign argument alone.
     "w_shed": -0.499,
     # An unfed animal is gone permanently and cost $300-500, so feeding
     # outranks everything a crop can ask for.
     "w_feed": 0.562,
     "w_harvest_animal": 3.5,
     "w_collect": 3.5,
+    # A brand new candidate, never offered before this round - not gated to
+    # zero-effect like the other new terms, because this is a priority rank
+    # (lower wins), not a multiplier with a meaningful "off" value. Started
+    # near w_care/w_collect's level as a reasonable guess for tuning to
+    # refine, not a considered answer.
+    "w_fertilize": 4.0,
     "w_care": 3.0,
     "w_drop": 4.943,
     "w_place": -1.419,
@@ -428,6 +531,7 @@ def _candidates(obs, farm, private):
     inventory = obs["market"]["inventory"]
     days_left = SEASON_DAYS - obs["day"]
     pending = {c: pending_units(farm, private, c) for c in CROP_SPEC}
+    fert_pending = private["shed"].get("FERTILIZER", 0)
 
     found, plantable = [], []
     empty_pens = animals_placed = unfed = 0
@@ -491,6 +595,16 @@ def _candidates(obs, farm, private):
             elif not tile["watered_today"]:
                 found.append(("w_water_idle", [WATER], x, y, 0, None))
 
+            # A separate action from watering, offered alongside whatever
+            # else this tile already qualified for - only while there is
+            # still a bonus-watering day left to spend it on, and only if
+            # the tile is not already covered by an earlier application
+            # (fertilized_until_day spans 3 days, so one application can
+            # cover several watering turns).
+            if (water_earns and tile.get("fertilized_until_day", -1) < obs["day"]
+                    and fertilize_value(crop, inventory, pending[crop], fert_pending) > 0):
+                found.append(("w_fertilize", [FERTILIZE], x, y, 0, "FERTILIZER"))
+
     # Planting more tiles in a turn than we hold seeds for makes every PLANT
     # that turn fail, not just the surplus ones - so each planned planting must
     # be backed by a seed we actually have.
@@ -507,7 +621,7 @@ def _candidates(obs, farm, private):
     # ahead of demand rather than covering the farm in empty structures.
     for x, y in plantable:
         if animal_worth > 0 and empty_pens < PARAMS["w_pen_ahead"]:
-            crop_best = max((crop_value(c, inventory, pending[c], days_left, shops)
+            crop_best = max((crop_value(c, inventory, pending[c], days_left, shops, fert_pending)
                              for c in CROP_SPEC), default=0)
             if animal_worth > crop_best:
                 empty_pens += 1
@@ -517,13 +631,13 @@ def _candidates(obs, farm, private):
         affordable = [c for c in CROP_SPEC if budget[c] > 0]
         best = max(
             affordable,
-            key=lambda c: crop_value(c, inventory, pending[c], days_left, shops),
+            key=lambda c: crop_value(c, inventory, pending[c], days_left, shops, fert_pending),
             default=None,
         )
         # Nothing left that can mature in time - stop planting entirely and
         # leave the workers free to harvest and sell.
         if (best is None
-                or crop_value(best, inventory, pending[best], days_left, shops) <= 0):
+                or crop_value(best, inventory, pending[best], days_left, shops, fert_pending) <= 0):
             break
         budget[best] -= 1
         # this tile's own output crowds the next one
@@ -582,6 +696,18 @@ def _candidates(obs, farm, private):
         if shed.get(animal, 0) > 0 and empty_pens:
             sx, sy = _shed_tiles(board)[0]
             found.append(("w_pickup", ["PICKUP", animal, 1], sx, sy, 0, None))
+
+    # FERTILIZE needs fertilizer in hand, the same held-item constraint as
+    # FEED - one pickup per tile that qualified and is not already carried.
+    fert_jobs = sum(1 for f in found if f[0] == "w_fertilize")
+    fert_carriers = sum(1 for inv in (private.get("inventories") or [])
+                        if inv.get("FERTILIZER", 0) > 0)
+    fert_needed = fert_jobs - fert_carriers
+    if fert_needed > 0 and shed.get("FERTILIZER", 0) > 0:
+        tiles = _shed_tiles(board)
+        for i in range(fert_needed):
+            sx, sy = tiles[i % len(tiles)]
+            found.append(("w_pickup", ["PICKUP", "FERTILIZER", max(fert_needed, 1)], sx, sy, 0, None))
     return found
 
 
@@ -751,8 +877,6 @@ def _assign_actions(obs, farm, private):
 
 
 def _market_orders(obs, farm, private):
-    # Hands vanish at end of day and must be rehired each morning. fib(n) makes
-    # the first few nearly free: 1, 1, 2, 3, 5, 8 ...
     # Selling first, always. Orders are capped at 10 per turn, so anything
     # placed ahead of SELL can crowd it out - and when cash runs low, failed
     # HIRE orders repeat every turn and do exactly that, starving the agent of
@@ -768,7 +892,6 @@ def _market_orders(obs, farm, private):
             qty -= keep_wheat  # feed stock is not for sale
         if qty > 0:
             orders.append(["SELL", item, qty])
-    orders += [["HIRE"]] * max(0, HANDS_PER_DAY - farm["hires_today"])
 
     prices = obs["market"]["prices"]
     days_left = SEASON_DAYS - obs["day"]
@@ -779,12 +902,31 @@ def _market_orders(obs, farm, private):
 
     inventory = obs["market"]["inventory"]
     shops = obs["town"]["unlocked_shops"]
+    fert_pending = private["shed"].get("FERTILIZER", 0)
     ranked = sorted(
         CROP_SPEC,
         key=lambda c: crop_value(c, inventory, pending_units(farm, private, c),
-                                 days_left, shops),
+                                 days_left, shops, fert_pending),
         reverse=True,
     )
+
+    # Tried pricing hires with hire_value() (below) instead of this flat
+    # target - fib cost against best_task_value * turns_left/TURNS_PER_DAY,
+    # the same $/tile/day crop_value and animal_value already use. Measured
+    # worse across the board: v18 and v22 both fell out of a 100% win rate,
+    # every already-solid matchup lost several thousand dollars, for a small
+    # gain against one still-hopeless opponent. The formula was wrong, not
+    # just unlucky - crop_value/animal_value price a FULL day's marginal
+    # tile, and scaling that by a fraction of today's turns treats an extra
+    # hand as able to do only a fraction of one tile's work, when in the
+    # turns it has left it can actually walk to and complete several
+    # separate full-value actions on different tiles. That systematically
+    # undervalued every hire past the first one or two, and the agent
+    # under-hired broadly (confirmed in test_behaviour.py: hires fell
+    # 1440->1323, idle share rose). hire_value() is kept below, unused, as a
+    # documented false start - the right fix needs a per-hand value that
+    # scales with how many actions it can still take, not a day-rate.
+    orders += [["HIRE"]] * max(0, HANDS_PER_DAY - farm["hires_today"])
 
     # Land is worth owning - removing it loses 36 of 40 games - but buying it
     # before the farm can afford to work it starves the seed budget for a third
@@ -828,7 +970,7 @@ def _market_orders(obs, farm, private):
     # 720, when unsold inventory scores nothing.
     for crop in ranked[:2]:
         if crop_value(crop, inventory, pending_units(farm, private, crop),
-                      days_left, shops) <= 0:
+                      days_left, shops, fert_pending) <= 0:
             continue
         # Restock all-or-nothing. Buying only what we can afford instead was
         # measured and is worse - 26W-54L over 80 games on two independent seed
