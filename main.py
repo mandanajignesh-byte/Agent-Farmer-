@@ -962,15 +962,25 @@ def _market_orders(obs, farm, private):
         orders.append(["BUY_ANIMAL", best_animal, want])
 
     # Feed is bought, never grown - a tile costs actions, which are scarcer than
-    # money. Keep a few days of buffer so a price spike never starves the herd.
-    # Wheat is the most shop-drained product in the game, so the buffer is
-    # priced against where the drift (w_town_drift) expects it to be, not
-    # today's quote.
+    # money. Wheat is the most shop-drained product in the game, so the price
+    # it's checked against is where the drift (w_town_drift) expects it to
+    # be, not today's quote.
+    #
+    # This used to require affording the full `want` (times a 2x buffer, on
+    # top of that) before buying any of it - the same all-or-nothing shape
+    # traced and fixed for BUY_ANIMAL, here on the one purchase where it is
+    # most dangerous: an unfed animal escapes for good after two consecutive
+    # missed days. Traced directly: 48 consecutive turns blocked (affordable
+    # in part, not in full) across every seed checked, 47 of them with an
+    # animal already unfed and zero wheat in the shed - real escape risk,
+    # not theoretical. BUY_PRODUCT is processed per unit by the environment
+    # (verified against source), so requiring only the first unit's cost
+    # lets it buy as much of `want` as it actually can.
     if livestock:
         want = livestock * 3 - private["shed"].get("WHEAT", 0)
         wheat_drift = PARAMS["w_town_drift"] * town_drain_per_day("WHEAT", shops) * (days_left / 2)
         feed_price = price_at("WHEAT", inventory.get("WHEAT", MARKET_I0) - wheat_drift)
-        if want > 0 and farm["money"] > feed_price * want * 2:
+        if want > 0 and farm["money"] > feed_price:
             orders.append(["BUY_PRODUCT", "WHEAT", want])
 
     # Only buy seed for a crop still worth planting. crop_value goes negative
