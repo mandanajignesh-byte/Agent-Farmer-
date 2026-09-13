@@ -491,6 +491,12 @@ PARAMS = {
     # "we are the only other seller" (1) - which is what partial cancellation
     # from an actively-selling opponent should look like.
     "w_town_drift": 0.488,
+    # Hard cap on extra hands hired beyond HANDS_PER_DAY in response to
+    # today's urgent-job backlog (0 = never respond). Not a ratio - fib-
+    # scaled hire cost means matching a large backlog 1:1 is ruinously
+    # expensive (measured: -$18k to -$27k with an uncapped ratio). Started
+    # at a small guess; sweep.py should settle it.
+    "w_hire_backlog": 3.0,
 }
 
 
@@ -847,7 +853,7 @@ def _hungarian(cost):
 INFEASIBLE = 1e9
 
 
-def _assign_actions(obs, farm, private):
+def _assign_actions(obs, farm, private, pool=None):
     """One action per worker, chosen to minimise the total score across every
     worker at once - the assignment problem, solved exactly with the
     Hungarian algorithm rather than the greedy pick-the-best-pair-repeatedly
@@ -859,11 +865,16 @@ def _assign_actions(obs, farm, private):
     PARAMS have no meaningful zero point (most are positive; doing some job
     has always beaten doing none, at any score, as long as one is feasible)
     - so a worker only ends up on PASS when there are genuinely fewer usable
-    candidates than workers, never because the search 'preferred' rest."""
+    candidates than workers, never because the search 'preferred' rest.
+
+    pool may be passed in already computed (agent() shares one board scan
+    between this and _market_orders' hiring decision) or left to compute its
+    own, so direct calls and tests keep working unchanged."""
     board_size = len(farm["tiles"])
     workers = [tuple(farm["farmer"])] + [tuple(h) for h in farm["hands"]]
     carrying = private.get("inventories") or [{}] * len(workers)
-    pool = _candidates(obs, farm, private)
+    if pool is None:
+        pool = _candidates(obs, farm, private)
 
     actions = [[PASS] for _ in workers]
     n, j_count = len(workers), len(pool)
@@ -917,7 +928,7 @@ def _assign_actions(obs, farm, private):
     return actions[0], actions[1:]
 
 
-def _market_orders(obs, farm, private):
+def _market_orders(obs, farm, private, pool=None):
     # Selling first, always. Orders are capped at 10 per turn, so anything
     # placed ahead of SELL can crowd it out - and when cash runs low, failed
     # HIRE orders repeat every turn and do exactly that, starving the agent of
@@ -967,7 +978,31 @@ def _market_orders(obs, farm, private):
     # 1440->1323, idle share rose). hire_value() is kept below, unused, as a
     # documented false start - the right fix needs a per-hand value that
     # scales with how many actions it can still take, not a day-rate.
-    orders += [["HIRE"]] * max(0, HANDS_PER_DAY - farm["hires_today"])
+    #
+    # HANDS_PER_DAY alone is a flat target, blind to the one thing that
+    # actually kills tiles: a temporary spike in urgent work outrunning
+    # worker count. Traced directly to real deaths: a land purchase triggers
+    # a planting burst (2 plants -> 56 plants in 3 days in one traced game),
+    # and the wave of same-age tiles all needing water lands on the SAME
+    # day - overwhelming the fixed 9-worker cap on that one day even though
+    # most days have slack. HANDS_PER_DAY=8 is our own arbitrary constant,
+    # not an environment limit (_do_hire only checks money) - fib-scaled
+    # hire cost is still cheap against the cash on hand during exactly this
+    # kind of burst, so staffing up temporarily should cost far less than
+    # the tiles it saves. Respond to how many urgent (deadline-bound) jobs
+    # exist right now, not a fixed count.
+    # fib-scaled cost means the backlog itself cannot be the hire count -
+    # matching a 20-tile burst 1:1 means paying fib(8..27), tens of
+    # thousands of dollars for a handful of tiles worth a few hundred each.
+    # w_hire_backlog is a hard cap on how many extra hands are ever worth
+    # it, not a ratio - the backlog only decides whether to spend up to
+    # that cap, never how far past it to go.
+    urgent_now = sum(1 for c in (pool or []) if c[0] in ("w_water_urgent", "w_harvest_decay"))
+    workers_now = 1 + len(farm["hands"])
+    extra_needed = max(0, urgent_now - workers_now)
+    extra_hired = min(extra_needed, round(PARAMS["w_hire_backlog"]))
+    hire_target = HANDS_PER_DAY + extra_hired
+    orders += [["HIRE"]] * max(0, hire_target - farm["hires_today"])
 
     # Land is worth owning - removing it loses 36 of 40 games - but buying it
     # before the farm can afford to work it starves the seed budget for a third
@@ -1049,9 +1084,10 @@ def _market_orders(obs, farm, private):
 def agent(obs):
     farm = obs["farms"][obs["player"]]
     private = obs["private"]
-    farmer, hands = _assign_actions(obs, farm, private)
+    pool = _candidates(obs, farm, private)
+    farmer, hands = _assign_actions(obs, farm, private, pool)
     return {
         "farmer": farmer,
         "hands": hands,
-        "market": _market_orders(obs, farm, private),
+        "market": _market_orders(obs, farm, private, pool),
     }

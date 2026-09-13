@@ -68,6 +68,7 @@ STEP = {
     # 0..1 in principle (a share of the town's drain), but nothing stops the
     # search finding a better fit outside that range, so it is not clamped.
     "w_town_drift": 0.2,
+    "w_hire_backlog": 0.5,
 }
 
 
