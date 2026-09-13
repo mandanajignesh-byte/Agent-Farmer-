@@ -447,6 +447,18 @@ PARAMS = {
     "w_place": -1.419,
     "w_build": 8.313,
     "w_pickup": 9.138,
+    # Split from w_pickup - see _candidates for why. Started at a fraction of
+    # w_pickup as a guess, not a considered answer; sweep.py should settle it.
+    # Split from w_pickup - see _candidates for why. Tested by hand across
+    # several values (1-9.138) head-to-head against the champion: none beat
+    # the no-op baseline, and 6.0 measured clearly worse (-$2,886, 31.2% win
+    # rate over 16 seeds). The diagnosis is real (bought animals sat unplaced
+    # 10-17 days in real games) but a single-weight sweep can't see this
+    # weight's interaction with the rest of the ecosystem - lowering it also
+    # lets it beat genuinely urgent jobs like w_water_urgent (8.418), trading
+    # a dying crop for an idle animal. Left at w_pickup's own value (a no-op)
+    # until a proper multi-weight search can place it correctly.
+    "w_pickup_animal": 9.138,
     # Pens are serviced every day, so where one is built fixes its running cost
     # for the rest of the season - the same argument as w_shed for planting.
     "w_pen_shed": 1.096,
@@ -692,10 +704,21 @@ def _candidates(obs, farm, private):
         for i in range(hungry):
             sx, sy = tiles[i % len(tiles)]
             found.append(("w_pickup", ["PICKUP", "WHEAT", max(hungry, 1)], sx, sy, 0, None))
+    # A separate weight from w_pickup: PLACE ranks as the single best
+    # candidate on the whole board once an animal is in hand (score ~0.6 of
+    # ~15-70 in real games), so the bottleneck is entirely getting a worker
+    # to detour and pick one up. Traced across real Kaggle replays: bought
+    # animals sat in the shed 10-17 days at a stretch, in wins and losses
+    # alike, because w_pickup's shared weight (9.138, tuned for the routine
+    # WHEAT/FERTILIZER case) ranked animal pickup around 32nd of ~68
+    # candidates every turn - never quite worth a detour, so it never
+    # happened. An idle animal earns nothing every day it waits; that is a
+    # bigger relative loss than a slightly delayed feed or fertilizer run,
+    # so it gets its own, separately tunable priority.
     for animal in ANIMAL_SPEC:
         if shed.get(animal, 0) > 0 and empty_pens:
             sx, sy = _shed_tiles(board)[0]
-            found.append(("w_pickup", ["PICKUP", animal, 1], sx, sy, 0, None))
+            found.append(("w_pickup_animal", ["PICKUP", animal, 1], sx, sy, 0, None))
 
     # FERTILIZE needs fertilizer in hand, the same held-item constraint as
     # FEED - one pickup per tile that qualified and is not already carried.
@@ -853,11 +876,29 @@ def _assign_actions(obs, farm, private):
     # let a worker skip a real job it could have done.
     m = max(j_count, n)
     cost = [[0.0] * m for _ in range(n)]
+    # A plant with consecutive_unwatered >= 1 (w_water_urgent's own trigger)
+    # dies at today's day-boundary unless it is watered again before then -
+    # verified against the environment (_daily_refresh_plants: unwatered a
+    # second day in a row converts the tile straight to WEED). Reaching and
+    # watering it costs distance + 1 turns; a worker who cannot finish both
+    # before the day ends cannot save the tile, no matter what the plain
+    # distance-scaled score says. Traced directly to a real death: a worker
+    # standing on the tile (distance 0, could water it this turn) was scored
+    # exactly tied with sending a worker two tiles away instead - who could
+    # only take one step closer before the day rolled over and the tile
+    # died regardless of "who" was assigned to it. Soft distance cost has no
+    # way to express "impossible", so this is the same INFEASIBLE treatment
+    # already used for a job whose required item is not held.
+    turns_left_today = TURNS_PER_DAY - obs["hour"]
     for w in range(n):
         wx, wy = workers[w]
         held = carrying[w] if w < len(carrying) else {}
         for c, candidate in enumerate(pool):
-            if candidate[5] and not held.get(candidate[5], 0):
+            key, _action, tx, ty, _units, needs = candidate
+            if needs and not held.get(needs, 0):
+                cost[w][c] = INFEASIBLE
+            elif (key == "w_water_urgent"
+                    and _distance(wx, wy, tx, ty) + 1 > turns_left_today):
                 cost[w][c] = INFEASIBLE
             else:
                 cost[w][c] = _score(candidate, wx, wy, board_size)
