@@ -502,6 +502,11 @@ PARAMS = {
     # reproduces the old cash-only gate exactly (a no-op starting point);
     # see _market_orders for the real-game evidence this responds to.
     "w_land_utilization": 0.7,
+    # Hard cap on extra hands hired for the animal-pickup backlog, separate
+    # from w_hire_backlog's own cap - see _market_orders for why sharing
+    # one cap between the two measured as a complete no-op. 0 = never
+    # respond, matching pre-fix behaviour.
+    "w_hire_pickup_backlog": 1.0,
 }
 
 
@@ -1018,11 +1023,33 @@ def _market_orders(obs, farm, private, pool=None):
     # w_hire_backlog is a hard cap on how many extra hands are ever worth
     # it, not a ratio - the backlog only decides whether to spend up to
     # that cap, never how far past it to go.
+    #
     urgent_now = sum(1 for c in (pool or []) if c[0] in ("w_water_urgent", "w_harvest_decay"))
     workers_now = 1 + len(farm["hands"])
     extra_needed = max(0, urgent_now - workers_now)
     extra_hired = min(extra_needed, round(PARAMS["w_hire_backlog"]))
-    hire_target = HANDS_PER_DAY + extra_hired
+
+    # An idle animal is a real backlog too - traced across real games (and
+    # confirmed present even in wins, so it is not itself what decides a
+    # game, just money left on the table): a bought animal sitting in the
+    # shed for 10-17 days straight because PICKUP never wins the routine
+    # daily competition against watering/feeding, even though PLACE scores
+    # as the single best move on the board the moment it is carried (rank 1
+    # of ~70 candidates, measured). Lowering PICKUP's own weight to fix that
+    # directly was tried and made things worse (-$1,361, 40.6% win rate) -
+    # it also started beating water_urgent, trading a saved crop for an
+    # idle animal. Hiring an EXTRA hand for it instead doesn't cost that
+    # trade-off, PROVIDED it is not sharing a cap with the water/harvest
+    # backlog above - the two were combined at first and measured, on the
+    # same seeds, byte-for-byte identical to not fixing it at all, because
+    # water/harvest alone routinely eats the whole shared cap and leaves
+    # nothing for this. A separate cap of its own is the only way either
+    # backlog is guaranteed a hand.
+    animals_waiting = sum(private["shed"].get(a, 0) for a in ANIMAL_SPEC)
+    pickup_backlog = min(empty_pens, animals_waiting)
+    extra_pickup = min(pickup_backlog, round(PARAMS["w_hire_pickup_backlog"]))
+
+    hire_target = HANDS_PER_DAY + extra_hired + extra_pickup
     orders += [["HIRE"]] * max(0, hire_target - farm["hires_today"])
 
     # Land is worth owning - removing it loses 36 of 40 games - but buying it

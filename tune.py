@@ -70,6 +70,7 @@ STEP = {
     "w_town_drift": 0.2,
     "w_hire_backlog": 0.5,
     "w_land_utilization": 0.1,
+    "w_hire_pickup_backlog": 0.5,
 }
 
 
