@@ -197,6 +197,18 @@ def crop_value(crop, inventory, pending, days_left=None, shops=None, fert_pendin
         # age >= MAX_YIELD_DAY, so it would never be picked even partially.
         # The seed is simply spent.
         return -seed_cost
+    # Tried projecting drift over the crop's own cycle (days) instead of
+    # days_left (the whole remaining season), the same fix as animal_value's
+    # cost amortization and for the same reason - the price a tile sells at
+    # is wherever the market sits when IT matures, not whenever the season
+    # ends. Reverted: it measured only $0-2.60 of difference in the one
+    # snapshot checked (the town's base drain rate is modest early on), but
+    # broke a real safety invariant in test_behaviour.py - 3 of 3 animal
+    # escapes had feed available afterward, where 0 did before. Likely
+    # cause: WHEAT is both a sellable crop and animal feed, and even a
+    # small drop in crop_value(WHEAT) shifts how much gets planted, which
+    # shifts how much ends up in the shed to feed animals with - a coupling
+    # this fix did not account for. Not worth the size of the measured gain.
     horizon = max(days_left or 0, 0) / 2
     drain = town_drain_per_day(crop, shops or [])
     effective_inventory = (inventory.get(crop, MARKET_I0) + pending
