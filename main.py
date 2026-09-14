@@ -497,11 +497,32 @@ PARAMS = {
     # expensive (measured: -$18k to -$27k with an uncapped ratio). Started
     # at a small guess; sweep.py should settle it.
     "w_hire_backlog": 3.0,
+    # Share of currently-unlocked land (plants + pens, out of everything
+    # unlocked) required before the next quadrant is worth buying. 0
+    # reproduces the old cash-only gate exactly (a no-op starting point);
+    # see _market_orders for the real-game evidence this responds to.
+    "w_land_utilization": 0.7,
 }
 
 
 def _distance(ax, ay, bx, by):
     return abs(ax - bx) + abs(ay - by)
+
+
+def _land_utilization(farm):
+    """Share of already-unlocked land actually put to work (a plant or a
+    pen), out of everything that could be. Locked tiles do not count either
+    way - they are not ours to use yet. A weed counts as unlocked-but-idle,
+    same as bare dirt: it is not producing until cleared and replanted."""
+    usable = occupied = 0
+    for row in farm["tiles"]:
+        for cell in row:
+            if cell == "LOCKED":
+                continue
+            usable += 1
+            if isinstance(cell, dict) and cell.get("kind") in ("PLANT", "PASTURE", "COOP"):
+                occupied += 1
+    return occupied / usable if usable else 0.0
 
 
 def _shed_distance(x, y, board_size):
@@ -1007,11 +1028,25 @@ def _market_orders(obs, farm, private, pool=None):
     # Land is worth owning - removing it loses 36 of 40 games - but buying it
     # before the farm can afford to work it starves the seed budget for a third
     # of the season. Hold back a tuned number of days of running costs.
+    #
+    # That reserve only ever gated on CASH, never on whether the land we
+    # already have is even in use - and w_land_reserve tuned to 0.0, so in
+    # practice we buy the moment we can afford it, every time. Traced
+    # against real Kaggle opponents: our toughest matchups all skip buying
+    # land on day 1 and instead rush 6+ pens onto the single starting
+    # quadrant first, banking a cash lead from early animal income that
+    # compounds all game - we buy land immediately regardless, and never
+    # catch up. w_land_utilization requires the CURRENT land to actually be
+    # worked (plants + pens, not bare dirt or uncleared weeds) before the
+    # next quadrant is worth it, the same argument as the cash reserve but
+    # for capacity instead of money. 0 reproduces the old always-buy
+    # behaviour exactly; sweep.py should find the real threshold.
     bought = len(farm["unlocked_quadrants"]) - 1
     if bought < MAX_QUADRANTS - 1 and obs["day"] <= LAND_LAST_DAY:
         reserve = PARAMS["w_land_reserve"] * daily_burn(
             farm, private, prices, ranked, livestock)
-        if farm["money"] >= 1000 * 2**bought + reserve:
+        if (farm["money"] >= 1000 * 2**bought + reserve
+                and _land_utilization(farm) >= PARAMS["w_land_utilization"]):
             orders.append(["BUY_LAND"])
     _av = lambda a: animal_value(a, prices, days_left, inventory,
                                  livestock, private["shed"], shops)

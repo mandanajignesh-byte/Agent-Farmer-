@@ -69,6 +69,7 @@ STEP = {
     # search finding a better fit outside that range, so it is not clamped.
     "w_town_drift": 0.2,
     "w_hire_backlog": 0.5,
+    "w_land_utilization": 0.1,
 }
 
 
