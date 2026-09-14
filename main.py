@@ -334,7 +334,25 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None,
     produce *= survival
     fertilizer *= survival
 
-    return (produce + fertilizer - feed - cost / max(days_left, 1)
+    # crop_value spreads its (much smaller) seed cost over the crop's own
+    # fixed cycle length, unaffected by the calendar except a hard cutoff
+    # when there is no longer time to mature at all - so a wheat tile is
+    # worth the same whether it is bought on day 1 or day 20. This instead
+    # spread the (much larger) purchase price over days_left, the whole
+    # remaining SEASON, which shrinks every single day regardless of the
+    # animal's own economics - the same sheep looked steadily worse for no
+    # reason but the calendar moving, dragging animal_value below
+    # crop_value for nearly the entire game (measured in a real loss:
+    # animal_value never won the BUILD_PASTURE comparison after day 12,
+    # settling at 5 pens for the rest of a 30-day game against an opponent
+    # who reached 13). w_animal_payback_days is a fixed floor on the
+    # divisor, the same role crop_value's fixed cycle length plays - it
+    # leaves every calculation with a full payback window ahead of it
+    # unchanged, and only softens the penalty once days_left actually runs
+    # low. 1 reproduces the old always-shrinking behaviour exactly (the
+    # existing max(days_left, 1) zero-guard, unchanged).
+    payback_divisor = max(days_left, PARAMS["w_animal_payback_days"])
+    return (produce + fertilizer - feed - cost / payback_divisor
             - PARAMS["w_action_cost"] * actions)
 
 def daily_burn(farm, private, prices, ranked, livestock):
@@ -507,6 +525,20 @@ PARAMS = {
     # one cap between the two measured as a complete no-op. 0 = never
     # respond, matching pre-fix behaviour.
     "w_hire_pickup_backlog": 1.0,
+    # Floor on animal_value's cost-amortization divisor - see animal_value
+    # for why the plain days_left divisor made a new animal look steadily
+    # worse for no reason but the calendar moving. Measured a complete
+    # no-op against the current league at every tested value (1 through
+    # 20) - the gate it was meant to help clear (animal_worth > crop_best)
+    # stayed unmet regardless, because crop_value's own margin was simply
+    # higher in every traced case, not because of this term. Harmless
+    # everywhere tested, and more internally consistent with crop_value's
+    # own fixed-cycle amortization, so kept - but this is a reasoned guess
+    # at roughly 1-2 production cycles (goose ~5-8 days, cow ~10-14, sheep
+    # ~9-15), not a considered answer; the real remaining question is why
+    # animal_value's margin trails crop_value's before either cost term is
+    # even subtracted.
+    "w_animal_payback_days": 10.0,
 }
 
 
