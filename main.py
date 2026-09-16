@@ -155,6 +155,14 @@ ANIMAL_SPEC = {
     "SHEEP": (500, "WOOL", 3, 6, 6),
 }
 
+# Rough daily actions per animal (feed + care + collect, amortised harvest -
+# animal_value's own "3 + 1/interval"), averaged across the herd mix rather
+# than tracked per-species, for the joint crop/animal capacity check in
+# crop_value and animal_value (see PARAMS["w_water_risk"]). A coarse
+# approximation is enough here - it feeds a capacity SIGNAL the tunable
+# weights calibrate, not an exact chore count.
+ANIMAL_ACTIONS_AVG = sum(3 + 1 / interval for _, _, interval, _, _ in ANIMAL_SPEC.values()) / len(ANIMAL_SPEC)
+
 
 def pending_units(farm, private, crop):
     """What we are already committed to selling of this crop - shed stock plus
@@ -170,7 +178,7 @@ def pending_units(farm, private, crop):
 
 
 def crop_value(crop, inventory, pending, days_left=None, shops=None, fert_pending=0,
-                planted_tiles=0):
+                planted_tiles=0, herd_load=0):
     """Profit per tile per day for ONE MORE tile of this crop, pricing its yield
     unit by unit as it pushes the price down.
 
@@ -223,14 +231,17 @@ def crop_value(crop, inventory, pending, days_left=None, shops=None, fert_pendin
     # crop_value's own version of animal_value's service_load/survival - see
     # PARAMS["w_water_risk"] for why this exists (crop planting had no
     # capacity discount at all before it) and what real regression it fixes.
-    # One more tile competes with every other planted tile and the whole
-    # herd for the same hands; tile_load is this tile's share of that
-    # competition, in daily actions, against what the farm can actually
-    # staff (w_workforce_capacity, not the animal side's separate w_pen_ahead
-    # target - crops and animals are priced against the same hands, but not
-    # yet against each other's CURRENT load, only their own kind's - a known
-    # simplification, not a full joint labour market).
-    tile_load = (planted_tiles + 1) * actions / PARAMS["w_workforce_capacity"]
+    # One more tile competes with every OTHER planted tile AND the whole herd
+    # for the same hands - herd_load (in the same daily-action units as
+    # `actions` here) is the herd's own share of that competition, passed in
+    # rather than computed locally, since crop_value has no visibility into
+    # the herd on its own. Checking only the crop side's own load, ignoring
+    # the herd entirely, was verified insufficient on its own: real games
+    # with this fix still climbed to 10-16 weed tiles by day 18-27, because
+    # the herd this same session's animal_value fix now also lets grow into
+    # double digits adds a real, large daily chore load of its own that a
+    # crop-only capacity check has no way to see.
+    tile_load = ((planted_tiles + 1) * actions + herd_load) / PARAMS["w_workforce_capacity"]
     survival = 1 / (1 + PARAMS["w_water_risk"] * max(0.0, tile_load - 1))
     revenue *= survival
     return (revenue - seed_cost) / days - PARAMS["w_action_cost"] * actions
@@ -272,7 +283,7 @@ def fertilize_value(crop, inventory, pending, fert_pending):
 
 
 def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None,
-                  shops=None):
+                  shops=None, crop_load=0):
     """Profit per tile per day, with the purchase amortised over the season that
     is left. Late in the game that term explodes and the value goes negative, so
     the agent stops buying without needing a cutoff date - it stops exactly at
@@ -375,8 +386,14 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None,
     # is the same real number, shared with crop_value's own version of this
     # discount (see PARAMS["w_water_risk"]). At or under 1 there are enough
     # hands and the risk is zero by construction; over 1, w_escape_risk sets
-    # how fast the survival odds fall off.
-    service_load = (herd + 1) * actions / PARAMS["w_workforce_capacity"]
+    # how fast the survival odds fall off. crop_load (in the same daily-
+    # action units as `actions` here) is the crop side's own current share
+    # of the same hands, passed in the same way crop_value now takes
+    # herd_load - checking only the herd's own load was verified
+    # insufficient the same way: a farm can run out of hands from a large
+    # crop plot just as easily as from a large herd, and each side needs to
+    # see the other's current commitment to price the shared capacity right.
+    service_load = ((herd + 1) * actions + crop_load) / PARAMS["w_workforce_capacity"]
     survival = 1 / (1 + PARAMS["w_escape_risk"] * max(0.0, service_load - 1))
     produce *= survival
     fertilizer *= survival
@@ -772,8 +789,13 @@ def _candidates(obs, farm, private):
 
     prices = obs["market"]["prices"]
     shops = obs["town"]["unlocked_shops"]
+    # Both in daily-action units - see crop_value/animal_value's joint
+    # capacity check (PARAMS["w_water_risk"]/PARAMS["w_escape_risk"]) for why
+    # each needs the other category's CURRENT load, not just its own.
+    herd_load = animals_placed * ANIMAL_ACTIONS_AVG
+    crop_load = planted_tiles
     _av = lambda a: animal_value(a, prices, days_left, inventory,
-                                 animals_placed, private["shed"], shops)
+                                 animals_placed, private["shed"], shops, crop_load)
     best_animal = max(ANIMAL_SPEC, key=_av)
     animal_worth = _av(best_animal)
 
@@ -816,7 +838,7 @@ def _candidates(obs, farm, private):
     for x, y in plantable:
         if animal_worth > 0 and pens_ahead < PARAMS["w_pen_ahead"]:
             crop_best = max((crop_value(c, inventory, pending[c], days_left, shops,
-                                        fert_pending, tiles_ahead)
+                                        fert_pending, tiles_ahead, herd_load)
                              for c in CROP_SPEC), default=0)
             if animal_worth > crop_best:
                 pens_ahead += 1
@@ -827,14 +849,14 @@ def _candidates(obs, farm, private):
         best = max(
             affordable,
             key=lambda c: crop_value(c, inventory, pending[c], days_left, shops,
-                                     fert_pending, tiles_ahead),
+                                     fert_pending, tiles_ahead, herd_load),
             default=None,
         )
         # Nothing left that can mature in time - stop planting entirely and
         # leave the workers free to harvest and sell.
         if (best is None
                 or crop_value(best, inventory, pending[best], days_left, shops,
-                              fert_pending, tiles_ahead) <= 0):
+                              fert_pending, tiles_ahead, herd_load) <= 0):
             break
         budget[best] -= 1
         # this tile's own output crowds the next one
@@ -1156,10 +1178,11 @@ def _market_orders(obs, farm, private, pool=None):
     fert_pending = private["shed"].get("FERTILIZER", 0)
     planted_tiles = sum(1 for row in farm["tiles"] for t in row
                         if isinstance(t, dict) and t.get("kind") == PLANT)
+    herd_load = livestock * ANIMAL_ACTIONS_AVG
     ranked = sorted(
         CROP_SPEC,
         key=lambda c: crop_value(c, inventory, pending_units(farm, private, c),
-                                 days_left, shops, fert_pending, planted_tiles),
+                                 days_left, shops, fert_pending, planted_tiles, herd_load),
         reverse=True,
     )
 
@@ -1263,7 +1286,7 @@ def _market_orders(obs, farm, private, pool=None):
                 and _land_utilization(farm) >= PARAMS["w_land_utilization"]):
             orders.append(["BUY_LAND"])
     _av = lambda a: animal_value(a, prices, days_left, inventory,
-                                 livestock, private["shed"], shops)
+                                 livestock, private["shed"], shops, planted_tiles)
     best_animal = max(ANIMAL_SPEC, key=_av)
     waiting = sum(private["shed"].get(a, 0) for a in ANIMAL_SPEC)
     # Buy for every pen that is standing empty and not already spoken for,
@@ -1347,7 +1370,7 @@ def _market_orders(obs, farm, private, pool=None):
     # 720, when unsold inventory scores nothing.
     for crop in ranked[:2]:
         if crop_value(crop, inventory, pending_units(farm, private, crop),
-                      days_left, shops, fert_pending, planted_tiles) <= 0:
+                      days_left, shops, fert_pending, planted_tiles, herd_load) <= 0:
             continue
         # Restock all-or-nothing. Buying only what we can afford instead was
         # measured and is worse - 26W-54L over 80 games on two independent seed
