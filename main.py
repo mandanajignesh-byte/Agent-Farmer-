@@ -707,12 +707,24 @@ def _candidates(obs, farm, private):
 
     # A pen only pays once an animal stands in it, so build them a tuned number
     # ahead of demand rather than covering the farm in empty structures.
+    #
+    # Counted on a separate variable from empty_pens, not empty_pens itself.
+    # A planned-but-not-yet-built pen is not a place to put an animal - it is
+    # still just bare ground with a BUILD candidate on it, since building is a
+    # worker action like any other and has not happened yet this turn. Found
+    # by tracing a fresh cash-drain bug: with w_pickup_animal's own check
+    # below reading this same empty_pens, an animal bought this very turn
+    # (before any real pen exists) looked pickupable immediately, sending a
+    # worker to carry it off with nowhere to place it - which emptied the
+    # shed, which made a from-scratch buy look needed again next turn, which
+    # bought another - repeatedly, well before any pen was actually built.
+    pens_ahead = empty_pens
     for x, y in plantable:
-        if animal_worth > 0 and empty_pens < PARAMS["w_pen_ahead"]:
+        if animal_worth > 0 and pens_ahead < PARAMS["w_pen_ahead"]:
             crop_best = max((crop_value(c, inventory, pending[c], days_left, shops, fert_pending)
                              for c in CROP_SPEC), default=0)
             if animal_worth > crop_best:
-                empty_pens += 1
+                pens_ahead += 1
                 found.append(("w_build", ["BUILD_" + STRUCTURE_FOR[best_animal]],
                               x, y, 0, None))
                 continue
@@ -1127,33 +1139,40 @@ def _market_orders(obs, farm, private, pool=None):
     # not just one at a time - a herd that only grows by one animal a day
     # cannot keep pace with pens that are free to build several at once.
     want = empty_pens - waiting
-    # Tried bootstrapping `want` to 1 even with zero pens yet, so BUY_ANIMAL
-    # could fire on day 0 before pens exist (BUY_ANIMAL needs no pen -
-    # verified against the env source, it just lands in the shed - but
-    # gating strictly on empty_pens made the very first purchase wait on a
-    # WORKER to physically build one first, and pen-building is worker-turn-
-    # limited while BUY_SEED is not). Real motivation: every real Kaggle game
-    # traced, wins and losses alike, spent all of day 0's cash on HIRE + two
-    # BUY_SEED orders (which already fill all 10 market-order slots) before a
-    # pen ever got built, so the first animal wasn't bought until day 5-12 -
-    # while both public league opponents (hardcoded day-0 animal buyers) beat
-    # us 0/56 games in fitness.py, by -$60k to -$90k. Reverted: the bootstrap
-    # itself worked (first animal on day 0-1), but it let the EXISTING
-    # "buy for every empty pen" rule fill all 3 of w_pen_ahead's pens almost
-    # immediately too, once cash started moving - the same 3-at-once herd
-    # baseline also eventually buys (on day 12, once season income arrives),
-    # just 10+ days earlier. Day 12's farm has slack to feed a sudden herd;
-    # day 1-2's does not - hands reset to just the farmer every midnight, and
-    # a fresh herd landed square in the day-0/1 planting burst, so all 3
-    # sheep went unfed a full day, twice running: test_behaviour.py's
-    # starvation invariant went from 0/0 to 19/19 escapes with feed
-    # available. The purchase-timing bug is real and confirmed; fixing it
-    # needs FEED to reliably win against the early watering rush too, not
-    # just an earlier purchase - a second, separate fix.
-    #
-    # want = max(want, 1) if livestock == 0 and waiting == 0 else want
+    # Bootstrapped to at least 1 even with zero pens yet. BUY_ANIMAL needs no
+    # pen to exist (verified against the env source - it just lands in the
+    # shed like any other purchase), but gating strictly on empty_pens made
+    # the very first purchase wait on a WORKER to physically build one first,
+    # and pen-building is worker-turn-limited while BUY_SEED is not. Every
+    # real Kaggle game traced, wins and losses alike, spent all of day 0's
+    # cash on HIRE + two BUY_SEED orders (which already fill all 10 market-
+    # order slots) before a pen ever got built, so the first animal wasn't
+    # bought until day 5-12 - while both public league opponents (hardcoded
+    # day-0 animal buyers) beat us 0/56 games in fitness.py, by -$60k to -$90k.
+    if want <= 0 and livestock == 0 and waiting == 0:
+        want = 1
     reserve = PARAMS["w_animal_reserve"] * daily_burn(
         farm, private, prices, ranked, livestock)
+    # Two narrower attempts - gating this on the single bootstrap call, then
+    # on livestock == 0 - both still regressed test_behaviour.py's starvation
+    # invariant (0/0 escapes -> 19/19). Traced directly: livestock flips from
+    # 0 to 1 the moment the FIRST bought sheep is placed, same day, well
+    # before the other 2 of w_pen_ahead's 3 pens finish filling - so a guard
+    # scoped to "livestock == 0" turned itself off right as purchases 2 and 3
+    # (still using the old, permissive reserve) rushed in and repeated the
+    # exact same collapse: all 3 sheep occupied by day 0 hour 20, money at
+    # exactly $0 by hour 21, and hiring a hand (as little as $1, the fib
+    # schedule resets every day) no longer affordable either - so the lone
+    # farmer ran the whole of day 1 alone. There is no game phase where
+    # spending the till to zero is actually safe, only ones where it
+    # happened not to get tested before now - w_animal_reserve is tuned
+    # negative (permissive) on the assumption that BUY_SEED's own 2x-cost
+    # restocking gate leaves enough behind, but nothing enforces that two
+    # independent purchases (seed and animal) leave a SHARED minimum behind
+    # together. Applying this reserve unconditionally costs nothing once the
+    # farm is established - by then daily_burn's own hiring term already
+    # dwarfs it - so there is no reason to scope it to early game at all.
+    reserve = max(reserve, sum(_fib_hire_cost(i) for i in range(HANDS_PER_DAY)))
     # BUY_ANIMAL is processed per unit by the env (verified against source:
     # it buys until money runs out, then simply stops - never fails the
     # whole order), the same as BUY_SEED already relies on elsewhere. This
