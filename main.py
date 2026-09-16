@@ -1127,6 +1127,31 @@ def _market_orders(obs, farm, private, pool=None):
     # not just one at a time - a herd that only grows by one animal a day
     # cannot keep pace with pens that are free to build several at once.
     want = empty_pens - waiting
+    # Tried bootstrapping `want` to 1 even with zero pens yet, so BUY_ANIMAL
+    # could fire on day 0 before pens exist (BUY_ANIMAL needs no pen -
+    # verified against the env source, it just lands in the shed - but
+    # gating strictly on empty_pens made the very first purchase wait on a
+    # WORKER to physically build one first, and pen-building is worker-turn-
+    # limited while BUY_SEED is not). Real motivation: every real Kaggle game
+    # traced, wins and losses alike, spent all of day 0's cash on HIRE + two
+    # BUY_SEED orders (which already fill all 10 market-order slots) before a
+    # pen ever got built, so the first animal wasn't bought until day 5-12 -
+    # while both public league opponents (hardcoded day-0 animal buyers) beat
+    # us 0/56 games in fitness.py, by -$60k to -$90k. Reverted: the bootstrap
+    # itself worked (first animal on day 0-1), but it let the EXISTING
+    # "buy for every empty pen" rule fill all 3 of w_pen_ahead's pens almost
+    # immediately too, once cash started moving - the same 3-at-once herd
+    # baseline also eventually buys (on day 12, once season income arrives),
+    # just 10+ days earlier. Day 12's farm has slack to feed a sudden herd;
+    # day 1-2's does not - hands reset to just the farmer every midnight, and
+    # a fresh herd landed square in the day-0/1 planting burst, so all 3
+    # sheep went unfed a full day, twice running: test_behaviour.py's
+    # starvation invariant went from 0/0 to 19/19 escapes with feed
+    # available. The purchase-timing bug is real and confirmed; fixing it
+    # needs FEED to reliably win against the early watering rush too, not
+    # just an earlier purchase - a second, separate fix.
+    #
+    # want = max(want, 1) if livestock == 0 and waiting == 0 else want
     reserve = PARAMS["w_animal_reserve"] * daily_burn(
         farm, private, prices, ranked, livestock)
     # BUY_ANIMAL is processed per unit by the env (verified against source:
