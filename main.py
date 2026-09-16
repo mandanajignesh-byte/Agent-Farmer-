@@ -169,7 +169,8 @@ def pending_units(farm, private, crop):
     return units
 
 
-def crop_value(crop, inventory, pending, days_left=None, shops=None, fert_pending=0):
+def crop_value(crop, inventory, pending, days_left=None, shops=None, fert_pending=0,
+                planted_tiles=0):
     """Profit per tile per day for ONE MORE tile of this crop, pricing its yield
     unit by unit as it pushes the price down.
 
@@ -219,6 +220,19 @@ def crop_value(crop, inventory, pending, days_left=None, shops=None, fert_pendin
         headroom = TRUE_MAX_YIELD[crop] - yield_units
         revenue += revenue_for(crop, effective_inventory + yield_units, headroom)
         actions += 1 / days  # the fertilize action, amortised like the harvest
+    # crop_value's own version of animal_value's service_load/survival - see
+    # PARAMS["w_water_risk"] for why this exists (crop planting had no
+    # capacity discount at all before it) and what real regression it fixes.
+    # One more tile competes with every other planted tile and the whole
+    # herd for the same hands; tile_load is this tile's share of that
+    # competition, in daily actions, against what the farm can actually
+    # staff (w_workforce_capacity, not the animal side's separate w_pen_ahead
+    # target - crops and animals are priced against the same hands, but not
+    # yet against each other's CURRENT load, only their own kind's - a known
+    # simplification, not a full joint labour market).
+    tile_load = (planted_tiles + 1) * actions / PARAMS["w_workforce_capacity"]
+    survival = 1 / (1 + PARAMS["w_water_risk"] * max(0.0, tile_load - 1))
+    revenue *= survival
     return (revenue - seed_cost) / days - PARAMS["w_action_cost"] * actions
 
 
@@ -307,8 +321,21 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None,
         return (inventory.get(item, MARKET_I0) + extra_pending
                 - PARAMS["w_town_drift"] * drain * horizon)
 
-    # what our existing herd will still add before this animal's output lands
-    made_per_animal = max(days_left, 0)
+    # what our existing herd will still add before this animal's output lands.
+    #
+    # Was max(days_left, 0) - the WHOLE remaining season, projected onto TODAY's
+    # price as if the herd's entire future output already crowds the market
+    # before a single unit of it exists. Verified against a real loss (Sean
+    # Peppers, replays_latest/episode-109321852): their WOOL price does crash
+    # to the $1 floor - but only by day 21-27, after weeks of actual selling,
+    # not on day 0. With this bug, a 3rd sheep already priced that entire
+    # crash in immediately (produce fell from $230 to $0.82 per tile-day at
+    # herd=3), which is what really capped the herd at w_pen_ahead's ~3, not
+    # any real lack of profit. crop_value bounds its own equivalent projection
+    # to the item's own fixed cycle length, never the season - the same fix
+    # here: how much the herd will add before ITS OWN next production event
+    # (interval days out), not everything it will ever produce.
+    made_per_animal = min(max(days_left, 0), interval)
     prod_pending = shed.get(product, 0) + herd * made_per_animal * (1 + interval) / interval
     fert_pending = shed.get("FERTILIZER", 0) + herd * made_per_animal
 
@@ -337,11 +364,19 @@ def animal_value(animal, prices, days_left, inventory=None, herd=0, shed=None,
     produce *= productive / max(days_left, 1)
 
     # service_load is the daily pen chores the herd this animal would join
-    # needs, divided by the hands the farm targets hiring - both read from the
-    # game, nothing assumed. At or under 1 there are enough hands and the risk
-    # is zero by construction; over 1, w_escape_risk sets how fast the
-    # survival odds fall off.
-    service_load = (herd + 1) * actions / HANDS_PER_DAY
+    # needs, divided by hands the farm can actually staff. Was HANDS_PER_DAY
+    # (8) - the BASE daily hire target before any backlog response, not what
+    # real games actually reach. Verified against real Kaggle replays and
+    # league_public/master_v3.py: hand counts of 12-17 by mid-game are
+    # ordinary once herds/plots justify the fib-scaled hiring cost. Pricing
+    # capacity at 8 forever made this discount bite at herd sizes real,
+    # working farms handle routinely, which is what actually capped the
+    # herd around 3-6 - not any real shortage of hands. w_workforce_capacity
+    # is the same real number, shared with crop_value's own version of this
+    # discount (see PARAMS["w_water_risk"]). At or under 1 there are enough
+    # hands and the risk is zero by construction; over 1, w_escape_risk sets
+    # how fast the survival odds fall off.
+    service_load = (herd + 1) * actions / PARAMS["w_workforce_capacity"]
     survival = 1 / (1 + PARAMS["w_escape_risk"] * max(0.0, service_load - 1))
     produce *= survival
     fertilizer *= survival
@@ -464,6 +499,15 @@ PARAMS = {
     # An unfed animal is gone permanently and cost $300-500, so feeding
     # outranks everything a crop can ask for.
     "w_feed": 0.562,
+    # A second, strictly cheaper priority for an animal already one missed
+    # feeding from escaping (consecutive_unfed >= 1) - see _pen_jobs for the
+    # real escape this fixes: every routine w_feed job shares one flat
+    # priority regardless of distance, so a pen far from the shed cluster
+    # can lose the distance competition to every closer pen, every day, and
+    # starve with wheat sitting untouched. Below every other candidate,
+    # including w_feed itself, so the one day this animal cannot afford to
+    # lose is never the day distance decides it for a farther pen.
+    "w_feed_urgent": -10.0,
     "w_harvest_animal": 3.5,
     "w_collect": 3.5,
     # A brand new candidate, never offered before this round - not gated to
@@ -515,6 +559,32 @@ PARAMS = {
     # is assumed perfectly fed no matter how large it gets - the search turned
     # this on, so it now does bite.
     "w_escape_risk": 0.449,
+    # Hands the farm can actually staff, for pricing how thin a bigger herd or
+    # crop plot spreads the workforce - see animal_value's service_load and
+    # crop_value's own equivalent. Was HANDS_PER_DAY (8) hardcoded into
+    # service_load directly: real games (ours and opponents') routinely hire
+    # past that once backlogs justify it - 12-17 hands by mid-game, verified
+    # against real Kaggle replays and league_public/master_v3.py - so pricing
+    # capacity at 8 forever capped the profitable herd size around 3-6
+    # regardless of how positive the raw economics were. A tunable PARAM
+    # instead of a second hardcoded constant, since the right number is an
+    # empirical question sweep.py can refine, not one this comment can settle.
+    "w_workforce_capacity": 15.0,
+    # crop_value's own version of w_escape_risk - how sharply a crop tile's
+    # value should fall once the board holds more planted tiles than the
+    # workforce can reliably water. Crop planting had NO such discount at
+    # all until now: crop_value priced every tile in isolation, so nothing
+    # ever stopped planting once land was unlocked. Traced directly to a
+    # live regression: a real loss (replays_v11/episode-109749026, vs Matt
+    # Dowis) held 44-67 planted tiles against 12 hands - visibly more plot
+    # than 3 quadrants' worth of hands can keep watered - while weed tiles
+    # (a tile that missed watering two days running, verified in
+    # test_model.py) climbed from 0 before day 15 to 10-13 a game from day 18
+    # on. Started at w_escape_risk's own value as the nearest real analog
+    # (same shape of risk, same headcount competing for it) and checked
+    # directly against real games below, not left at the old always-plant
+    # 0 - a genuine fix needs this actually turned on to do anything.
+    "w_water_risk": 0.449,
     # How much of the town's daily drain we still trust once a real opponent
     # is adding supply to the same market and cancelling part of it. The
     # search landed almost exactly halfway between "ignore the town" (0) and
@@ -615,6 +685,7 @@ def _candidates(obs, farm, private):
     step, hour = obs["step"], obs["hour"]
     seeds = private["seeds"]
     can_plant = TURNS_PER_DAY - hour >= 2
+    board_size = len(farm["tiles"])
 
     inventory = obs["market"]["inventory"]
     days_left = SEASON_DAYS - obs["day"]
@@ -622,7 +693,7 @@ def _candidates(obs, farm, private):
     fert_pending = private["shed"].get("FERTILIZER", 0)
 
     found, plantable = [], []
-    empty_pens = animals_placed = unfed = 0
+    empty_pens = animals_placed = unfed = planted_tiles = 0
     for y, row in enumerate(farm["tiles"]):
         for x, tile in enumerate(row):
             if tile == "LOCKED":
@@ -646,6 +717,7 @@ def _candidates(obs, farm, private):
                 continue
             if tile.get("kind") != PLANT:
                 continue
+            planted_tiles += 1
 
             lifespan = tile["max_lifespan_step"]
             decaying = lifespan != -1 and step >= lifespan
@@ -705,6 +777,23 @@ def _candidates(obs, farm, private):
     best_animal = max(ANIMAL_SPEC, key=_av)
     animal_worth = _av(best_animal)
 
+    # Tried sorting plantable nearest-shed-first here, on the theory that a
+    # pen built far from the shed cluster (a real traced escape: (8,2) lost
+    # the daily distance competition to every closer pen and starved with
+    # wheat untouched) only happens because board-scan order plants and pens
+    # wherever the row/column loop reaches next, with no regard for repeat-
+    # visit cost. Measured, not assumed: reverted, because it made things
+    # much worse, not better - 79 of 60 seasons broke the starvation
+    # invariant (up from 2), with peak herd rising to 17 (from 12-14). The
+    # mechanism isn't understood - clustering every pen right at the shed
+    # should shorten feeding walks, not lengthen the escape count - which
+    # itself is a reason not to ship it: a fix whose own effect contradicts
+    # its own reasoning needs to be understood before it is trusted, not
+    # just measured once and kept because the number moved. w_feed_urgent
+    # above still catches the (8,2)-style case after the fact and measured
+    # clean (0/60, then 2/60 at a bigger sample) - real pen placement is
+    # still an open question, not one a same-turn sort answered.
+
     # A pen only pays once an animal stands in it, so build them a tuned number
     # ahead of demand rather than covering the farm in empty structures.
     #
@@ -719,9 +808,15 @@ def _candidates(obs, farm, private):
     # shed, which made a from-scratch buy look needed again next turn, which
     # bought another - repeatedly, well before any pen was actually built.
     pens_ahead = empty_pens
+    # Mirrors pens_ahead: counted separately from planted_tiles itself, since
+    # a tile this same loop just decided to plant is not yet a real worker
+    # commitment either - it is a PLANT candidate a worker still has to walk
+    # to and execute, exactly the pens_ahead argument above.
+    tiles_ahead = planted_tiles
     for x, y in plantable:
         if animal_worth > 0 and pens_ahead < PARAMS["w_pen_ahead"]:
-            crop_best = max((crop_value(c, inventory, pending[c], days_left, shops, fert_pending)
+            crop_best = max((crop_value(c, inventory, pending[c], days_left, shops,
+                                        fert_pending, tiles_ahead)
                              for c in CROP_SPEC), default=0)
             if animal_worth > crop_best:
                 pens_ahead += 1
@@ -731,17 +826,20 @@ def _candidates(obs, farm, private):
         affordable = [c for c in CROP_SPEC if budget[c] > 0]
         best = max(
             affordable,
-            key=lambda c: crop_value(c, inventory, pending[c], days_left, shops, fert_pending),
+            key=lambda c: crop_value(c, inventory, pending[c], days_left, shops,
+                                     fert_pending, tiles_ahead),
             default=None,
         )
         # Nothing left that can mature in time - stop planting entirely and
         # leave the workers free to harvest and sell.
         if (best is None
-                or crop_value(best, inventory, pending[best], days_left, shops, fert_pending) <= 0):
+                or crop_value(best, inventory, pending[best], days_left, shops,
+                              fert_pending, tiles_ahead) <= 0):
             break
         budget[best] -= 1
         # this tile's own output crowds the next one
         pending[best] += CROP_SPEC[best][0]
+        tiles_ahead += 1
         found.append(("w_plant", [PLANT, best], x, y, 0, None))
     # Restocking is pure overhead - it feeds no animal and grows no crop - so
     # ask for it only when the herd actually needs more wheat than the workers
@@ -837,7 +935,26 @@ def _pen_jobs(obs, tile, x, y):
                 jobs.append(("w_place", ["PLACE", name], x, y, 0, name))
         return jobs
     if not tile["fed_today"]:
-        jobs.append(("w_feed", ["FEED"], x, y, 0, "WHEAT"))
+        # consecutive_unfed >= 1 means today is this animal's SECOND miss in a
+        # row if it slips again - the escape threshold, verified against the
+        # env source (kaggriculture.py: consecutive_unfed >= 2 triggers it).
+        # Every routine w_feed job already shares the same flat priority
+        # (0.562, the lowest of any candidate) regardless of which pen it is
+        # on, so with a big enough herd spread across the board, Hungarian
+        # picks whichever subset of feed jobs is CHEAPEST BY DISTANCE that
+        # turn - and a pen built far from the shed cluster can lose that
+        # distance competition to every closer pen, every single day, with
+        # no relation to whether workers or wheat are actually short. Traced
+        # directly to a real escape: one pen at (8,2), isolated from a
+        # cluster near (0,0)-(5,4), went unfed two full days running while
+        # 9 closer animals were fed every day and the shed held 55-69 wheat
+        # the whole time. A separate, strictly cheaper priority for the
+        # animal already one miss from escaping - the same rescue pattern
+        # w_water_urgent already uses for a tile one day from dying - beats
+        # every routine feed job on priority alone, so distance can no
+        # longer cost it the one day it cannot afford to lose.
+        key = "w_feed_urgent" if tile.get("consecutive_unfed", 0) >= 1 else "w_feed"
+        jobs.append((key, ["FEED"], x, y, 0, "WHEAT"))
     # Caring a fed animal banks a unit that pays out on its next production -
     # roughly $160-200 for one action, the best return of anything on the farm.
     # The bank is only credited if the animal is also fed that day.
@@ -1037,10 +1154,12 @@ def _market_orders(obs, farm, private, pool=None):
     inventory = obs["market"]["inventory"]
     shops = obs["town"]["unlocked_shops"]
     fert_pending = private["shed"].get("FERTILIZER", 0)
+    planted_tiles = sum(1 for row in farm["tiles"] for t in row
+                        if isinstance(t, dict) and t.get("kind") == PLANT)
     ranked = sorted(
         CROP_SPEC,
         key=lambda c: crop_value(c, inventory, pending_units(farm, private, c),
-                                 days_left, shops, fert_pending),
+                                 days_left, shops, fert_pending, planted_tiles),
         reverse=True,
     )
 
@@ -1105,6 +1224,18 @@ def _market_orders(obs, farm, private, pool=None):
     pickup_backlog = min(empty_pens, animals_waiting)
     extra_pickup = min(pickup_backlog, round(PARAMS["w_hire_pickup_backlog"]))
 
+    # Tried a third backlog term here, hiring extra hands for a placed herd's
+    # daily chores (feed/care/collect/harvest), the same pattern as
+    # extra_pickup just above. It made things WORSE - 6 of 20 seasons broke
+    # the starvation invariant, up from 2 - despite (because of?) a bigger
+    # peak herd (12, up from 10-11). Reverted: reactively hiring more once a
+    # backlog is already visible cannot be the right fix for a herd the
+    # AGENT ITSELF chose to grow past what it can actually service - that is
+    # a belief animal_value should hold before recommending the purchase,
+    # not a scramble to hire around afterward. See animal_value's
+    # service_load for the real fix: its HANDS_PER_DAY denominator is the
+    # same stale constant, so it already tries to capture exactly this
+    # capacity limit - just calibrated against the wrong number.
     hire_target = HANDS_PER_DAY + extra_hired + extra_pickup
     orders += [["HIRE"]] * max(0, hire_target - farm["hires_today"])
 
@@ -1216,7 +1347,7 @@ def _market_orders(obs, farm, private, pool=None):
     # 720, when unsold inventory scores nothing.
     for crop in ranked[:2]:
         if crop_value(crop, inventory, pending_units(farm, private, crop),
-                      days_left, shops, fert_pending) <= 0:
+                      days_left, shops, fert_pending, planted_tiles) <= 0:
             continue
         # Restock all-or-nothing. Buying only what we can afford instead was
         # measured and is worse - 26W-54L over 80 games on two independent seed
